@@ -12,7 +12,7 @@ to ensure reproducibility.
 
 import os
 import sys
-import json
+import json # ADDED: now needed to read/write status file for progress updates
 import subprocess
 import hashlib # REMEDIATION: Use hashlib for deterministic hashing
 import logging
@@ -111,6 +111,25 @@ def execute_hunt(
 
    for gen in range(num_generations):
        logging.info(f"--- GENERATION {gen}/{num_generations-1} ---")
+
+       # --- NEW: Update status.json with current generation count ---
+       try:
+            # Read current status
+            if os.path.exists(settings.STATUS_FILE):
+                with open(settings.STATUS_FILE, 'r') as f:
+                    status = json.load(f)
+            else:
+                status = {}
+            
+            # Update current generation
+            status.update({"current_gen": gen + 1, "total_gens": num_generations})
+            
+            # Write back
+            with open(settings.STATUS_FILE, 'w') as f:
+                json.dump(status, f, indent=2)
+       except Exception as e:
+            logging.warning(f"Could not update status file for progress: {e}")
+       # --- END NEW UPDATE ---
 
        param_batch = hunter.breed_next_generation(population_size)
        job_contexts = []

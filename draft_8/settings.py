@@ -2,7 +2,7 @@
 settings.py
 CLASSIFICATION: V11.0 Central Configuration File
 GOAL: Acts as the single source of truth for all configuration parameters.
-STATUS: REMEDIATED (Run 14 Gold Master + API Consolidation)
+STATUS: VALIDATED (Fixed Missing STATUS_FILE)
 """
 import os
 from pathlib import Path
@@ -15,6 +15,8 @@ DATA_DIR = BASE_DIR / "simulation_data"
 CONFIG_DIR = BASE_DIR / "input_configs"
 LOG_DIR = BASE_DIR / "logs"
 LEDGER_FILE = BASE_DIR / "simulation_ledger.csv"
+# [FIX] Added missing definition required by app.py
+STATUS_FILE = BASE_DIR / "status.json"
 
 # --- SCRIPT POINTERS ---
 WORKER_SCRIPT = "worker_sncgl_sdg.py"
@@ -35,7 +37,6 @@ JOB_TIMEOUT_SECONDS = 600
 VALIDATOR_TIMEOUT_SECONDS = 300
 
 # --- DATA CONTRACT KEYS (BACKEND) ---
-# MANDATE: "job_uuid" is required to prevent pipeline deadlocks.
 HASH_KEY = "job_uuid"  
 SSE_METRIC_KEY = "log_prime_sse"
 STABILITY_METRIC_KEY = "sdg_h_norm_l2"

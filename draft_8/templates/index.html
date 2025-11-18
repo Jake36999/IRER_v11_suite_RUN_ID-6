@@ -35,17 +35,23 @@
             <h2 class="text-xl font-semibold mb-2 text-white">Live Status</h2>
             <div id="status-banner" class="p-3 mb-4 rounded-md text-center font-mono bg-gray-700 text-yellow-300">Idle</div>
             
+            <div id="progress-container" class="mb-6 hidden">
+                <h3 class="text-sm font-semibold text-gray-300 mb-1">Overall Progress: <span id="progress-label">0%</span></h3>
+                <div class="w-full bg-gray-700 rounded-full h-4">
+                    <div id="progress-bar" class="bg-cyan-600 h-4 rounded-full transition-all duration-500" style="width: 0%"></div>
+                </div>
+            </div>
             <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
                 <div class="bg-gray-900 p-3 rounded">
-                    <div class="text-sm text-gray-400">Last Event</div>
+                    <div class="text-sm text-gray-400">Last Event (Job UUID)</div>
                     <div id="status-event" class="font-mono text-lg text-gray-200">-</div>
                 </div>
                 <div class="bg-gray-900 p-3 rounded">
-                    <div class="text-sm text-gray-400">Last SSE</div>
+                    <div class="text-sm text-gray-400">Last SSE (Fitness Inverse)</div>
                     <div id="status-sse" class="font-mono text-lg text-cyan-400">-</div>
                 </div>
                 <div class="bg-gray-900 p-3 rounded">
-                    <div class="text-sm text-gray-400">Last H-Norm</div>
+                    <div class="text-sm text-gray-400">Last H-Norm (SDG Stability)</div>
                     <div id="status-h-norm" class="font-mono text-lg text-purple-400">-</div>
                 </div>
             </div>
@@ -64,28 +70,37 @@
         const statusSse = document.getElementById('status-sse');
         const statusHNorm = document.getElementById('status-h-norm');
         const finalResultBox = document.getElementById('final-result-box');
+        
+        // NEW Progress Bar Elements
+        const progressBar = document.getElementById('progress-bar');
+        const progressLabel = document.getElementById('progress-label');
+        const progressContainer = document.getElementById('progress-container');
 
         let isPolling = false;
         let pollInterval;
         let const_keys = {}; // Will store the dynamic keys
+        let maxGenerations = 1; // Used for progress calculation
 
         async function startHunt() {
             btnStartHunt.disabled = true;
             statusBanner.textContent = "Starting Hunt...";
             try {
+                const generations = parseInt(genInput.value, 10);
                 const response = await fetch('/api/start-hunt', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                        generations: parseInt(genInput.value, 10),
+                        generations: generations,
                         population: parseInt(popInput.value, 10)
                     })
                 });
                 const data = await response.json();
                 if (response.ok) {
+                    maxGenerations = generations; // Set max generations on start
                     if (!isPolling) {
                         isPolling = true;
                         pollInterval = setInterval(pollStatus, 3000);
+                        progressContainer.classList.remove('hidden');
                     }
                 } else {
                     statusBanner.textContent = `Error: ${data.message}`;
@@ -103,21 +118,30 @@
                 return;
             }
             try {
-                const response = await fetch('/api/get-status');
-                const data = await response.json();
+                // Fetch status data
+                const statusResponse = await fetch('/api/get-status');
+                const statusData = await statusResponse.json();
 
-                // REMEDIATION : Use dynamic keys, not "magic strings"
-                const status = data[const_keys.HUNT_STATUS] || 'Unknown';
+                // Fetch progress data (NEW)
+                const progressResponse = await fetch('/api/get-progress');
+                const progressData = await progressResponse.json();
+                
+                // Update Progress Bar (NEW)
+                updateProgressBar(progressData.current_gen, progressData.total_gens);
+
+                // Update Status Panel
+                const status = statusData[const_keys.HUNT_STATUS] || 'Unknown';
                 statusBanner.textContent = status;
-                statusEvent.textContent = data[const_keys.LAST_EVENT] || '-';
-                statusSse.textContent = data[const_keys.LAST_SSE] || '-';
-                statusHNorm.textContent = data[const_keys.LAST_STABILITY] || '-';
-                finalResultBox.textContent = JSON.stringify(data[const_keys.FINAL_RESULT] || {}, null, 2);
+                statusEvent.textContent = statusData[const_keys.LAST_EVENT] || '-';
+                statusSse.textContent = statusData[const_keys.LAST_SSE] || '-';
+                statusHNorm.textContent = statusData[const_keys.LAST_STABILITY] || '-';
+                finalResultBox.textContent = JSON.stringify(statusData[const_keys.FINAL_RESULT] || {}, null, 2);
 
                 if (status === 'Completed' || status.startsWith('Error')) {
                     btnStartHunt.disabled = false;
                     clearInterval(pollInterval);
                     isPolling = false;
+                    progressContainer.classList.add('hidden'); // Hide progress bar on finish/error
                 } else {
                     btnStartHunt.disabled = true;
                 }
@@ -125,6 +149,16 @@
                 console.error("Polling failed:", error);
                 statusBanner.textContent = "Polling Error";
             }
+        }
+        
+        // NEW function to update the visual progress bar
+        function updateProgressBar(currentGen, totalGens) {
+            if (totalGens < 1) return;
+            // Progress calculation ensures we don't go over 100%
+            const progress = Math.min(100, (currentGen / totalGens) * 100);
+            
+            progressBar.style.width = `${progress}%`;
+            progressLabel.textContent = `${Math.floor(progress)}% (Generation ${currentGen}/${totalGens})`;
         }
 
         // This function runs on page load to fetch the dynamic keys
@@ -134,7 +168,7 @@
                 const keys = await response.json();
                 const_keys = keys; // Store keys globally
                 console.log("Data contract loaded:", const_keys);
-                // Now that keys are loaded, start polling
+                // Start polling to get initial status/progress if a hunt is running
                 pollStatus();
             }
             catch (error) {
