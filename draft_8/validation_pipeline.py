@@ -1,3 +1,4 @@
+%%writefile validation_pipeline.py
 """
 validation_pipeline.py
 CLASSIFICATION: V11.0 Validation Service (Analysis Plane)
