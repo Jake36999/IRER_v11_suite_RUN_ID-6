@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>IRER V11.0 | Dynamic Control Hub</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = { darkMode: 'class' }
+    </script>
+</head>
+<body class="bg-gray-900 text-gray-200 font-sans p-8">
+    <div class="max-w-4xl mx-auto">
+        <h1 class="text-3xl font-bold text-cyan-400">IRER V11.0 Control Hub</h1>
+        <p class="text-gray-400 mb-6">"HPC-SDG" Core | Dynamic Analysis Layer</p>
+
+        <div class="bg-gray-800 p-6 rounded-lg shadow-lg mb-6">
+            <h2 class="text-xl font-semibold mb-4 text-white border-b border-gray-700 pb-2">Control Panel</h2>
+            <div class="grid grid-cols-2 gap-4 mb-4">
+                <div>
+                    <label for="gen-input" class="block text-sm font-medium text-gray-300">Generations</label>
+                    <input type="number" id="gen-input" value="10" class="mt-1 block w-full bg-gray-700 border-gray-600 rounded-md shadow-sm text-white p-2">
+                </div>
+                <div>
+                    <label for="pop-input" class="block text-sm font-medium text-gray-300">Population Size</label>
+                    <input type="number" id="pop-input" value="10" class="mt-1 block w-full bg-gray-700 border-gray-600 rounded-md shadow-sm text-white p-2">
+                </div>
+            </div>
+            <button id="btn-start-hunt" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded disabled:bg-gray-500 disabled:cursor-not-allowed">
+                Start New Hunt
+            </button>
+        </div>
+
+        <div class="bg-gray-800 p-6 rounded-lg shadow-lg">
+            <h2 class="text-xl font-semibold mb-2 text-white">Live Status</h2>
+            <div id="status-banner" class="p-3 mb-4 rounded-md text-center font-mono bg-gray-700 text-yellow-300">Idle</div>
+            
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
+                <div class="bg-gray-900 p-3 rounded">
+                    <div class="text-sm text-gray-400">Last Event</div>
+                    <div id="status-event" class="font-mono text-lg text-gray-200">-</div>
+                </div>
+                <div class="bg-gray-900 p-3 rounded">
+                    <div class="text-sm text-gray-400">Last SSE</div>
+                    <div id="status-sse" class="font-mono text-lg text-cyan-400">-</div>
+                </div>
+                <div class="bg-gray-900 p-3 rounded">
+                    <div class="text-sm text-gray-400">Last H-Norm</div>
+                    <div id="status-h-norm" class="font-mono text-lg text-purple-400">-</div>
+                </div>
+            </div>
+
+            <h3 class="font-semibold text-lg mb-2 text-cyan-400">Final Result (Best Run)</h3>
+            <pre id="final-result-box" class="bg-gray-900 p-3 rounded h-48 overflow-y-auto text-sm"></pre>
+        </div>
+    </div>
+
+    <script>
+        const btnStartHunt = document.getElementById('btn-start-hunt');
+        const genInput = document.getElementById('gen-input');
+        const popInput = document.getElementById('pop-input');
+        const statusBanner = document.getElementById('status-banner');
+        const statusEvent = document.getElementById('status-event');
+        const statusSse = document.getElementById('status-sse');
+        const statusHNorm = document.getElementById('status-h-norm');
+        const finalResultBox = document.getElementById('final-result-box');
+
+        let isPolling = false;
+        let pollInterval;
+        let const_keys = {}; // Will store the dynamic keys
+
+        async function startHunt() {
+            btnStartHunt.disabled = true;
+            statusBanner.textContent = "Starting Hunt...";
+            try {
+                const response = await fetch('/api/start-hunt', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        generations: parseInt(genInput.value, 10),
+                        population: parseInt(popInput.value, 10)
+                    })
+                });
+                const data = await response.json();
+                if (response.ok) {
+                    if (!isPolling) {
+                        isPolling = true;
+                        pollInterval = setInterval(pollStatus, 3000);
+                    }
+                } else {
+                    statusBanner.textContent = `Error: ${data.message}`;
+                    btnStartHunt.disabled = false;
+                }
+            } catch (error) {
+                statusBanner.textContent = 'Error: Could not connect to server.';
+                btnStartHunt.disabled = false;
+            }
+        }
+
+        async function pollStatus() {
+            if (!const_keys.HUNT_STATUS) {
+                console.error("Constants not loaded, polling aborted.");
+                return;
+            }
+            try {
+                const response = await fetch('/api/get-status');
+                const data = await response.json();
+
+                // REMEDIATION : Use dynamic keys, not "magic strings"
+                const status = data[const_keys.HUNT_STATUS] || 'Unknown';
+                statusBanner.textContent = status;
+                statusEvent.textContent = data[const_keys.LAST_EVENT] || '-';
+                statusSse.textContent = data[const_keys.LAST_SSE] || '-';
+                statusHNorm.textContent = data[const_keys.LAST_STABILITY] || '-';
+                finalResultBox.textContent = JSON.stringify(data[const_keys.FINAL_RESULT] || {}, null, 2);
+
+                if (status === 'Completed' || status.startsWith('Error')) {
+                    btnStartHunt.disabled = false;
+                    clearInterval(pollInterval);
+                    isPolling = false;
+                } else {
+                    btnStartHunt.disabled = true;
+                }
+            } catch (error) {
+                console.error("Polling failed:", error);
+                statusBanner.textContent = "Polling Error";
+            }
+        }
+
+        // This function runs on page load to fetch the dynamic keys
+        async function init() {
+            try {
+                const response = await fetch('/api/get-constants');
+                const keys = await response.json();
+                const_keys = keys; // Store keys globally
+                console.log("Data contract loaded:", const_keys);
+                // Now that keys are loaded, start polling
+                pollStatus();
+            }
+            catch (error) {
+                console.error("FATAL: Could not load data contract from /api/get-constants.", error);
+                statusBanner.textContent = "CONTRACT_LOAD_FAIL";
+            }
+        }
+
+        btnStartHunt.addEventListener('click', startHunt);
+        document.addEventListener('DOMContentLoaded', init); // Start by loading constants
+    </script>
+</body>
+</html>

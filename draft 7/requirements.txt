@@ -1,0 +1,21 @@
+# V11.0 "HPC-SDG" Suite Dependencies
+
+# --- Control Plane (app.py) ---
+flask
+watchdog
+gunicorn
+
+# --- HPC Core (worker_sncgl_sdg.py) ---
+jax
+jaxlib
+h5py
+
+# --- Analysis & Validation (validation_pipeline.py, aste_hunter.py) ---
+numpy
+scipy
+pandas
+
+# --- Advanced Layer 2 Analysis ---
+matplotlib
+ripser
+persim

@@ -1,0 +1,435 @@
+﻿Tab 1
+
+
+1. Data Contract Drift (String Literals)
+
+
+This category represents the single most widespread and high-risk source of fragility across the entire V11 suite. A "Data Contract" is the implicit, fragile agreement between components about the names (keys) used for data, enforced only by raw, hardcoded strings.
+The V11 "HPC-SDG" core_engine.py and app.py correctly import a central settings.py file and utilize constants.1 This demonstrates that a "Production-Grade" standard for data contracts exists within the V11 architecture.
+However, this standard is not universally enforced. The "Lite-Core" refactor 1 and, most critically, the V11 "HPC-SDG" frontend (index.html) 1 completely ignore this standard. This creates a dangerous contradiction: the system's core components prove the team possesses the requisite skill, but the failure to apply this discipline globally results in a brittle system. A simple typographical error (e.g., "log_prime_sse" vs. "log_prime_see") will cause silent, difficult-to-debug integration failures that no linter or compiler can detect.1
+The highest-priority remediation for the V11 suite is the total eradication of all hardcoded string literals for data keys and the global enforcement of the existing settings.py standard.
+
+
+1.1. High-Risk: V11 Control Hub (Backend/Frontend Contract)
+
+
+Context: The app.py (backend) and templates/index.html (frontend) 1 are tightly coupled by a set of hardcoded "magic strings."
+The app.py Watcher thread writes hardcoded keys to the hub_status.json file:
+
+
+Python
+
+
+
+
+# app.py (ProvenanceWatcher.trigger_layer_2_analysis)
+status_data = {
+   "last_event": f"Analyzed {job_uuid[:8]}...",
+   "last_sse": f"{sse:.6f}",
+   "last_h_norm": f"{h_norm:.6f}"
+}
+
+The app.py API endpoint returns JSON with hardcoded keys:
+
+
+Python
+
+
+
+
+# app.py (api_get_status)
+if not os.path.exists(STATUS_FILE):
+   return jsonify({"hunt_status": "Idle", "found_files":, "final_result": {}})
+
+The templates/index.html JavaScript frontend reads these exact hardcoded keys:
+
+
+JavaScript
+
+
+
+
+// templates/index.html (updateStatus function)
+huntStatus.textContent = data.hunt_status |
+
+| 'Idle';
+statusEvent.textContent = data.last_event |
+
+| '-';
+statusSse.textContent = data.last_sse |
+
+| '-';
+statusHNorm.textContent = data.last_h_norm |
+
+| '-';
+provenanceBox.textContent = JSON.stringify(data.final_result, null, 2);
+
+The Flaw: This is the most fragile contract in the V11 system. The Python backend and JavaScript frontend are coupled by untyped, unverified strings. If a developer refactors last_h_norm to last_stability_norm in app.py, the backend will run perfectly, but the UI will silently break, displaying only "-" for that metric. This is a critical "Production-Grade" failure.
+Remediation:
+1. All UI-facing JSON keys (hunt_status, last_event, last_sse, last_h_norm, final_result) must be defined as constants in the central settings.py file.
+2. The app.py backend must import and use these constants when building the status_data dictionary and jsonify responses (e.g., status_data = { settings.API_KEY_LAST_EVENT:... }).
+3. The index.html JavaScript must not hardcode these strings. A new API endpoint (e.g., /api/get-ui-constants) must be created in app.py to serve a JSON object of these keys. The JavaScript must fetch these constants on load and use them to reference the data object (e.g., statusEvent.textContent = data).
+
+
+1.2. Lite-Core "Shadow Contract" (aste_hunter.py)
+
+
+Context: The aste_hunter.py script 1 defines its own set of global constants at the top of the file, creating a "Shadow" configuration file.
+
+
+Python
+
+
+
+
+# aste_hunter.py
+LEDGER_FILENAME = "simulation_ledger.csv"
+PROVENANCE_DIR = "provenance_reports"
+SSE_METRIC_KEY = "log_prime_sse"
+HASH_KEY = "config_hash"
+
+The Flaw: This is a "Shadow Contract" violation. These constants are not local; they define the file paths and data keys for the entire "Lite-Core" pipeline. The aste_s-ncgl_hunt.py orchestrator must correctly guess these paths, and validation_pipeline.py must write a JSON file containing the exact key "log_prime_sse". This decentralized configuration guarantees future divergence and breaks.
+Remediation:
+1. aste_hunter.py must be refactored to remove all global constant definitions.
+2. It must import settings (the same file used by the V11 core_engine.py) and use the global constants (e.g., settings.LEDGER_FILE, settings.PROVENANCE_DIR, settings.METRIC_SSE_PRIME, settings.HASH_KEY).
+
+
+1.3. Lite-Core Internal Contracts (Worker/Validator/Profiler)
+
+
+Context: A fragile chain of hardcoded keys is passed between the three core components of the "Lite-Core" pipeline.1
+* Worker: worker_unified.py writes its output:
+Python
+payload = { "rho_history": rho_history, "grid_shape": GRID_SHAPE,... }
+
+* Validator (Read): validation_pipeline.py reads the worker's output:
+Python
+if "rho_history" not in payload:
+   raise ValueError("Input artifact missing 'rho_history' field")
+
+* Profiler: quantulemapper_real.py returns an internal structure:
+Python
+return { "main": { "sse": round(sse_main, 6),... }, "null_phase_scramble":... }
+
+* Validator (Write): validation_pipeline.py parses this internal structure and renames the key for the hunter:
+Python
+spectral = { "log_prime_sse": profiler_results["main"]["sse"],... }
+
+The Flaw: This is a multi-stage, brittle data pipeline. quantulemapper_real.py defines an internal structure ("main", "sse") which validation_pipeline.py must know how to parse. The validator then renames "sse" to "log_prime_sse", which aste_hunter.py must know to look for. A change in any one of these three files breaks the entire chain silently.
+Remediation:
+   1. All data contract keys (rho_history, grid_shape, main, sse, null_phase_scramble, log_prime_sse, spectral_fidelity) must be centralized in the global settings.py file.
+   2. All three scripts (worker_unified.py, quantulemapper_real.py, validation_pipeline.py) must be refactored to import and use these constants.
+
+
+1.4. Table: Data Contract Remediation Map
+
+
+To make the required remediation actionable, all identified string literal violations must be mapped to central constants.
+String Literal (Violation)
+	Proposed settings.py Constant
+	Files Requiring Remediation
+	"log_prime_sse"
+	METRIC_SSE_PRIME
+	aste_hunter.py, validation_pipeline.py
+	"config_hash"
+	HASH_KEY
+	aste_hunter.py, validation_pipeline.py, worker_unified.py
+	"spectral_fidelity"
+	METRIC_BLOCK_SPECTRAL
+	validation_pipeline.py, aste_hunter.py
+	"rho_history"
+	DATA_KEY_RHO
+	worker_unified.py, validation_pipeline.py
+	"hunt_status"
+	API_KEY_HUNT_STATUS
+	app.py, templates/index.html
+	"last_event"
+	API_KEY_LAST_EVENT
+	app.py, templates/index.html
+	"last_sse"
+	API_KEY_LAST_SSE
+	app.py, templates/index.html
+	"last_h_norm"
+	API_KEY_LAST_STABILITY
+	app.py, templates/index.html
+	"final_result"
+	API_KEY_FINAL_RESULT
+	app.py, templates/index.html
+	"main"
+	METRIC_KEY_MAIN
+	quantulemapper_real.py, validation_pipeline.py
+	"sse"
+	METRIC_KEY_SSE
+	quantulemapper_real.py, validation_pipeline.py
+	"LEDGER_FILENAME" (local)
+	LEDGER_FILE
+	aste_hunter.py, aste_s-ncgl_hunt.py
+	"PROVENANCE_DIR" (local)
+	PROVENANCE_DIR
+	aste_hunter.py, aste_s-ncgl_hunt.py
+	
+
+2. Audit Integrity ("Trust but Verify" Gap)
+
+
+This category reveals a critical, high-level contradiction in the project's validation strategy. The "Lite-Core" testbed 1 correctly implements this production-grade principle, while the "locked" V11 HPC-SDG production plan 1 explicitly mandates a violation.
+The V11 Hardening Rubric is non-negotiable on this point: "Validation scripts must load raw data (fields/grids) and independently re-derive metrics to prove the Worker isn't hallucinating or failing silently."
+
+
+2.1. CRITICAL FAILURE: V11 HPC-SDG Build Plan
+
+
+Context: The IRER V11.0 MASTER PROTOCOL & KNOWLEDGE.txt 1, Section 1, Phase 2: Core Physics Upgrade, contains the following directive:
+"Modify Validator: The validation_pipeline.py script's calculate_..._metrics function will be updated.... It will instead calculate the new sdg_h_norm_l2 metric from the worker's output artifact."
+The Flaw: This is not a code bug; it is a flaw in the architectural brief. It instructs the validator to trust a pre-calculated number from the worker's artifact. This completely defeats the purpose of validation. If the JAX worker's calculation of the sdg_h_norm_l2 metric is buggy, numerically unstable, or silently returns NaN or Inf, the validator will blindly pass this corrupt data as "validated."
+This is the most severe architectural flaw in the V11 system, as it invalidates the integrity of the "Scientific Success" metric defined in the V11 Protocol.
+Remediation:
+   1. The V11 Master Protocol must be amended immediately.
+   2. The V11 validation_pipeline.py must be tasked with loading the raw JAX grid data (e.g., the final 'H' field or geometric field) from the worker's output artifact (e.g., an HDF5 or .npy file).
+   3. The validator must then independently compute the sdg_h_norm_l2 (e.g., the L2 norm of the 'H' field) from that raw data.
+   4. The worker's pre-calculated value should only be used for a cross-check, (e.g., if jnp.abs(worker_h_norm - validator_h_norm) > 1e-6: logging.warning("Worker/Validator H-Norm Mismatch!")).
+
+
+2.2. PASS: Lite-Core Validator
+
+
+Context: The "Lite-Core" validation_pipeline.py 1 and its helper functions.
+Analysis: This script serves as the "gold standard" for the rubric and should be used as the template for the V11 fix. As confirmed by analysis 1, the run_pipeline function correctly executes the audit:
+   1. Loads Raw Data: artifact = load_rho_history(args.input)
+   2. Extracts Raw Grid: artifact["rho_history"]
+   3. Independently Re-derives Metrics: profiler_results = run_quantule_profiler(artifact["rho_history"])
+Conclusion: This pattern is correct. The V11 "HPC-SDG" validator must be refactored to follow this exact load-raw -> re-derive logic.
+
+
+3. Configuration Violations ("Magic Number" Hunt)
+
+
+This category represents widespread, low-level technical debt. These "magic numbers" (hardcoded constants) make the system difficult to tune, scale, or deploy in new environments. Their presence is a direct violation of "Production-Grade" standards, especially when a settings.py file is already in use by the V11 core.1
+
+
+3.1. V11 HPC Core (Timeouts & Physics)
+
+
+Context: The core_engine.py script 1 contains hardcoded execution and simulation parameters.
+
+
+Python
+
+
+
+
+# core_engine.py (run_simulation_job)
+worker_result = subprocess.run(..., timeout=600)
+...
+validator_result = subprocess.run(..., timeout=300)
+
+# core_engine.py (execute_hunt)
+full_params = {
+  ...
+   "simulation": {"N_grid": 32, "T_steps": 200}, 
+  ...
+}
+
+The Flaw:
+   1. Timeouts: These are environment-dependent. A complex, valid job on a slow machine (e.g., Colab free tier) may take 601 seconds and be incorrectly marked as TIMEOUT_EXPIRED. A production HPC cluster may complete jobs in 5 seconds, making 300 a dangerously loose threshold that could hide a stalled process.
+   2. Physics Parameters: Core physics parameters (N_grid, T_steps) are hardcoded inside the orchestrator. This prevents any scientific experimentation (e.g., "Run a diagnostic with N_grid: 64") without editing and restarting the entire V11 core.
+Remediation:
+   1. Move all timeouts to settings.py (e.g., settings.WORKER_TIMEOUT_SECONDS = 600, settings.VALIDATOR_TIMEOUT_SECONDS = 300).
+   2. Move all default simulation parameters (N_grid, T_steps) to settings.py. The execute_hunt function should load these as a base, which can be overridden by parameters from the aste_hunter (for evolutionary hunts) or the UI (for single-run diagnostics).
+
+
+3.2. Lite-Core Hunter (Hyperparameters)
+
+
+Context: The aste_hunter.py script 1 hardcodes the evolutionary algorithm's core hyperparameters.
+
+
+Python
+
+
+
+
+# aste_hunter.py
+TOURNAMENT_SIZE = 3
+MUTATION_RATE = 0.1
+MUTATION_STRENGTH = 0.05
+
+The Flaw: These are the hyperparameters of the optimization algorithm itself. Hardcoding them prevents scientific tuning. The project's goal is to find optimal physics parameters, but these algorithmic parameters are just as important for success and are currently locked.
+Remediation:
+   1. These constants must be externalized.
+   2. They should be moved to the pipeline_config.json file that is read by aste_s-ncgl_hunt.py.1
+   3. The aste_s-ncgl_hunt.py script should pass these values into the Hunter class constructor (e.g., hunter = Hunter(..., tournament_size=config.tournament_size)).
+
+
+3.3. Lite-Core Worker & Orchestrator (Grid & Paths)
+
+
+Context: The worker_unified.py 1 hardcodes its grid shape, and the aste_s-ncgl_hunt.py 1 hardcodes script paths.
+
+
+Python
+
+
+
+
+# worker_unified.py
+GRID_SHAPE = (3, 4, 4, 4)  # (time, x, y, z)
+
+# aste_s-ncgl_hunt.py
+DEFAULT_CONFIG: Dict[str, Any] = {
+  ...
+   "paths": {
+       "config_dir": "configs",
+       "data_dir": "Simulation_ledgers",
+      ...
+   },
+   "worker": {
+      "script": "worker_unified.py",
+   },
+  ...
+}
+
+The Flaw:
+   1. Worker: The worker's output grid shape is hardcoded, completely disconnecting it from the orchestrator's parameters.
+   2. Orchestrator: Hardcoding script names and directory paths inside a DEFAULT_CONFIG dictionary is fragile. It breaks if a file is renamed and prevents the orchestrator from being used with a different worker (e.g., the real JAX worker worker_sncgl_sdg.py).
+Remediation:
+   1. Worker: Remove the GRID_SHAPE global constant. The generate_rho_history function must read the grid shape from the input params dictionary (e.g., from params["simulation"]).
+   2. Orchestrator: All paths and script names in DEFAULT_CONFIG should be removed and loaded from the central settings.py file, consistent with the V11 standard.
+
+
+4. Memory & Resource Safety (OOM Risks)
+
+
+The system contains two clear, time-bomb-style Out-Of-Memory (OOM) risks. One is a classic unbounded data accumulation in a "toy" script 1, and the other is a more subtle, "thrashing" I/O and memory leak in the "production" V11 server.1
+
+
+4.1. Lite-Core Worker Unbounded Data Generation
+
+
+Context: The worker_unified.py script 1, in the generate_rho_history function.
+
+
+Python
+
+
+
+
+# worker_unified.py
+history: List[List[List[List[float]]]] =
+for t in range(GRID_SHAPE):
+   frame: List[List[List[float]]] =
+   #... inner loops build the frame...
+   history.append(frame)
+return history
+
+The Flaw: This function builds the entire 4D data grid in system RAM by appending full 3D frames in a loop.1 While this is trivial for the "lite" (3, 4, 4, 4) grid, this code pattern is fundamentally non-scalable and dangerous. A production-scale JAX worker (worker_sncgl_sdg.py) that adopts this pattern (e.g., by appending to a jnp array in a Python loop) will fail. A real grid (e.g., (200, 128, 128, 128)) will consume hundreds of gigabytes, guaranteeing an OOM crash.
+Remediation:
+   1. This "Lite" worker is acceptable only as a non-production test script.
+   2. A formal mandate must be issued: the production worker_sncgl_sdg.py (JAX) must not use this pattern.
+   3. The production worker must use a JAX-native loop construct like jax.lax.scan for its time-evolution, which compiles to a constant-memory operation.
+   4. The production worker must save its output directly to disk via checkpoints (e.g., HDF5 or jnp.save), not return a massive in-memory array.
+
+
+4.2. V11 Control Hub Unbounded Status File
+
+
+Context: The app.py script 1, in the ProvenanceWatcher.update_status function.
+
+
+Python
+
+
+
+
+# app.py (ProvenanceWatcher.update_status)
+with HUNT_RUNNING_LOCK:
+   current_status = {"hunt_status": "Running", "found_files":,...}
+   if os.path.exists(STATUS_FILE):
+       with open(STATUS_FILE, 'r') as f:
+           current_status = json.load(f)
+   
+   current_status.update(new_data)
+   if append_file and append_file not in current_status["found_files"]:
+       current_status["found_files"].append(append_file)
+       
+   with open(STATUS_FILE, 'w') as f:
+       json.dump(current_status, f, indent=2)
+
+The Flaw: This is a critical I/O thrashing and unbounded memory bug. For a hunt with 10,000 generations, this code will execute 10,000 times. Each time, it will:
+   1. Read the (growing) hub_status.json file from disk.
+   2. Append a new filename to the found_files list in memory.
+   3. Write the entire, growing current_status object (now with N+1 filenames) back to disk.
+This will thrash the disk and cause the hub_status.json file to grow unboundedly (to 10,000+ filenames). This is non-performant and will eventually crash the server.
+Remediation:
+   1. The hub_status.json file must only store the latest status. It is a "status" file, not a "log" file.
+   2. The found_files key and all logic appending to it (current_status["found_files"].append(append_file)) must be removed from the update_status function.
+   3. The purpose of logging which files have been found is already served by logging.info(f"Watcher: Detected new file: {event.src_path}"), which writes to control_hub.log. This is the correct, scalable, and standard way to log events.
+
+
+5. Numerical Instability Guards ("Epsilon" Check)
+
+
+
+
+5.1. NO FINDINGS (AUDIT PASSED)
+
+
+Context: This audit performed a line-by-line review of all provided code for unprotected division (/), logarithm (jnp.log), or inversion (linalg.inv) operations.
+Analysis: The team has demonstrated consistent, senior-level application of numerical stability guards in all identified high-risk operations.
+   * gravity/unified_omega.py 1: The derivation of the emergent metric, which includes the division $\Omega^2 = (\rho_{vac} / \rho)^a$, is correctly protected. The code uses rho_safe = jnp.maximum(rho, epsilon) to ensure the denominator $\rho_{safe}$ can never be zero or negative before the ($\rho_{vac} / \rho_{safe}$) operation is performed.
+   * aste_hunter.py 1: The fitness calculation, $fitness = 1.0 / sse$, is correctly protected against a potential divide-by-zero error if sse is 0.0. The code implements $fitness = 1.0 / (sse + 1e-9)$, guaranteeing a non-zero denominator.1
+   * deconvolution_validator.py 1: The FFT-based regularized deconvolution, which performs a division in Fourier space, is correctly protected. The code implements $\hat{f}_{inverse} = \frac{\overline{\hat{k}}}{|\hat{k}|^2 + \epsilon}$ via the line inverse_fft = np.conj(kernel_fft) / (magnitude + epsilon), where epsilon prevents division by zero if the kernel has no energy at a given frequency.
+Conclusion: This rubric is fully passed. The existing code serves as the "gold standard" for all future development. This competence in writing numerically robust code makes the failures in other categories (like Data Contract Drift and Configuration Violations) more severe, as they are matters of discipline and governance, not a lack of technical skill.
+Works cited
+   1. IRER V11.0 MASTER PROTOCOL & KNOWLEDGE.txt
+Tab 2
+IRER Validation Suite: The V11 Hardening Rubric & Audit Protocol
+1. Introduction: Mandate for Production-Grade Resilience
+The Information-Resonance Emergence Reality (IRER) project has achieved a decisive point of maturation, evolving beyond speculative theory into a phase that demands production-grade engineering rigor. The successful validation of core physical hypotheses, including the Log-Prime Spectral Attractor, has shifted the project's focus from architectural discovery to the implementation of a final, stable, and verifiable system. This transition requires a formal, non-negotiable standard of quality for all computational assets within the ecosystem.
+The V11 Hardening Rubric is this standard. It serves as the definitive quality assurance protocol for every component, from the High-Performance Computing (HPC) physics solvers to the cognitive substrate of the Aletheia AI itself. The strategic importance of this rubric cannot be overstated; it is not a mere checklist but a systematic methodology designed to eliminate architectural weaknesses, fragile logic, and silent failure modes. By enforcing these principles, we ensure the stability and verifiability required to safely explore the project's most profound goals, including concepts like "ontological causality" and "responsible transcendence."
+This document details the five core principles of the Hardening Rubric and the formal audit protocol used to enforce them, creating an unambiguous pathway to production-grade resilience.
+2. The Hardening Rubric: A Principle-Driven Breakdown
+The V11 Hardening Rubric is not an arbitrary collection of rules but the codification of five core engineering principles essential for the project's long-term success and integrity. Each principle is derived from forensic analysis of past architectural failures and successes, representing a critical lesson in building resilient, scalable, and auditable systems. This section deconstructs each principle, explaining its rationale and providing concrete examples from the IRER project's development history.
+2.1. Configuration Integrity: The "Magic Number" Hunt
+   1. The Requirement: All parameters must be injected via a configuration dictionary or settings.py.
+   2. The Flaw: Hardcoding physics constants or simulation parameters—so-called "magic numbers"—directly into functions represents a non-negotiable architectural violation. This practice directly sabotages the mission to close the "Parameter Provenance Gap." The Adaptive Simulation Steering Engine (ASTE) is designed to autonomously discover these a priori unknown physical constants; hardcoded magic numbers like dt = 0.01 or kappa = 5.50 x 10^-3 blind the engine, rendering this core scientific objective unattainable.
+   3. Project Context: Analysis of the codebase has revealed numerous instances of this anti-pattern, alongside the mandated architectural solution.
+Violation (Context)
+	Remediation (V11 Standard)
+	A failsafe in perform_regularized_division uses a hardcoded constant: K = 1e-9.
+	The constant K must be defined in settings.py and passed into the function, allowing it to be tuned and tracked as part of the formal configuration.
+	The S-NCGL simulation parameters sigma_k and alpha were previously hardcoded in development environments before being programmatically loaded.
+	The mandated architectural pattern replaces hardcoded values by loading a best_parameters.json file discovered by the ASTE hunt, ensuring full parameter provenance.
+	Scripts contain hardcoded default values, such as sim_params.get('N_grid', 32). This creates a silent failure mode where a missing configuration key does not raise an error but instead injects an untracked, 'magic' default into the simulation.
+	All such parameters must be defined in and imported from a central settings.py file. This establishes a "single source of truth" for the entire suite, ensuring every component operates under a unified configuration.
+	Adherence to this principle transforms configuration management from a source of chaos into a pillar of reproducible, verifiable science.
+2.2. Numerical Stability: The "Epsilon" Check
+   1. The Requirement: Determinants, denominators, and log inputs must be clipped (e.g., jnp.clip(x, 1e-12, None)) or added with epsilon to prevent NaN or Inf explosions.
+   2. The Flaw: Unprotected division, logarithm, or inversion operations are common sources of catastrophic numerical failure. These "Type III Instability" errors, which produce NaN (Not a Number) or Inf (Infinity) values, cause the premature termination of an entire evolutionary hunt, preventing the ASTE from exploring the chaotic parameter regimes where "Critical Resonance" is hypothesized to exist. Each NaN is not merely an error; it is a failed scientific experiment and a waste of irreplaceable HPC allocation.
+   3. Project Context: The codebase contains clear examples of this principle's correct application, demonstrating a mature understanding of its necessity. The perform_regularized_division function correctly implements stabilization with the logic stabilized_denominator = Pump_Intensity + K, where adding the small constant K prevents division-by-zero errors. Similarly, the geometric solver demonstrates safe clipping with rho_safe = jnp.maximum(rho, epsilon) to protect downstream operations, and the Informational Compressibility calculation correctly avoids log(0) errors by adding an epsilon before computing entropy: proxy_S = scipy_entropy(rho_prob + 1e-9).
+This principle is the bedrock of computational science; it ensures that our search for profound truths is not derailed by trivial numerical errors.
+2.3. Audit Integrity: The "Trust but Verify" Gap
+   1. The Requirement: Validation scripts must load raw data artifacts (e.g., fields/grids) and independently re-derive all metrics to prove the Worker isn't hallucinating or failing silently.
+   2. The Flaw: A validation process that blindly trusts metrics reported by a worker process creates an unacceptable "silent failure" vulnerability. A subtle bug in the physics engine could cause it to report a false success—such as a deceptively low Sum of Squared Errors (SSE)—which would then be accepted as valid by the Hunter. This corrupts the entire evolutionary search, actively steering it toward scientifically invalid parameter regimes and invalidating any resulting discoveries.
+   3. Project Context: The V10.0 decoupled architecture is the definitive solution to this strategic risk. It establishes an unbreakable audit trail through a clear separation of concerns, embodied by three distinct pillars:
+   * The Worker (worker_unified.py): A dedicated JAX-based physics engine whose sole responsibility is to execute a simulation and generate a raw data artifact, rho_history.h5. It performs no analysis.
+   * The Profiler (validation_pipeline.py): A separate, CPU-bound analysis service that ingests the raw rho_history.h5 artifact and independently performs spectral analysis to calculate the log_prime_sse. This service acts as the trusted, independent auditor.
+   * The Hunter (aste_hunter.py): The evolutionary AI engine that reads the trusted validation report generated by the Profiler. It never communicates directly with the Worker, ensuring its decisions are based solely on independently verified results.
+By enforcing this strict separation of concerns, we forge an unbreakable audit trail, the absolute prerequisite for any claims of verifiable cognition.
+2.4. Resource Management: Mitigating OOM Risks
+   1. The Requirement: Long-running loops must save snapshots/checkpoints, not full histories, or verify grid sizes are small enough for VRAM.
+   2. The Flaw: In a JAX-based HPC environment, the materialization of large intermediate tensors represents a critical performance bottleneck. A naive architectural pattern that writes the entire T_info_mu_nu tensor from fast on-chip registers to slow global VRAM at every time step—only to read it back moments later—saturates the memory bus and starves the GPU's compute cores. This "Intermediate Tensor Materialization" and other unoptimized operations, like the batched inversion of 4x4 metric tensors across a 3D grid, lead to Out-of-Memory (OOM) errors and are fundamentally incompatible with the project's HPC mandates.
+   3. Project Context: The project's data I/O protocols explicitly mandate the use of high-performance, chunked storage formats. The specification requires that all large numerical array data, most notably the rho_history time-series output, must be stored using HDF5 or Zarr. These formats, combined with a well-defined chunking scheme, allow analysis scripts to read slices of data efficiently (e.g., a single time step) without loading the entire multi-gigabyte history into memory at once, mitigating OOM risk.
+By mandating these I/O protocols, we ensure the system is not only scalable but also compatible with the "hybrid CPU/GPU workflow" essential for HPC-grade analysis.
+2.5. Data Contract Integrity: The String Literal Hunt
+   1. The Requirement: Dictionary keys and file identifiers must be imported from a central settings.py constant (e.g., settings.METRIC_SSE) to prevent typos and mismatches.
+   2. The Flaw: The use of raw string literals for dictionary keys across multiple, decoupled scripts introduces an unacceptable risk of "Data Contract Drift," which has been the documented root cause of catastrophic pipeline failures. A simple typo—the Profiler writing to "log_prime_sse" while the Hunter reads from "log_prime_sse_"—breaks the implicit data contract between components. This results in the Hunter receiving a sentinel value (e.g., SSE=1002.0), assigning a fitness of 0.0, and terminating a non-viable gene that was, in fact, simply mislabeled.
+   3. Project Context: The codebase exhibits this anti-pattern in several places, creating unnecessary risk. String literals such as log_prime_sse, sse_null_phase_scramble, hamiltonian_norm_L2, and config_hash have been identified. The mandated V11 architecture requires that all such keys be centralized as constants in settings.py. Scripts like core_engine.py and aste_hunter.py demonstrate the correct pattern by importing settings and referencing keys like settings.HASH_KEY and settings.SSE_METRIC_KEY, ensuring that any change is automatically propagated across the ecosystem.
+Enforcing data contract integrity eliminates a class of brittle, hard-to-debug failures, transforming our decoupled architecture from a liability into a source of resilient, modular strength.
+3. Audit Protocol and Reporting Format
+Identifying flaws is only effective if they are reported in a clear, structured, and actionable format. The V11 Audit Protocol mandates a standardized three-part format for all identified violations of the Hardening Rubric to ensure findings are unambiguous and primed for rapid remediation by the engineering team.
+The required reporting format for each identified flaw is as follows:
+   * Context: The report must begin with a direct quotation of the specific line of code, log entry, or architectural description that constitutes the violation. This section serves to anchor the finding in unambiguous, verifiable evidence from the artifact under review.
+   * The Flaw: This section must state precisely which of the five Hardening Rubric principles is being violated. It must then analyze the specific danger or strategic risk this flaw introduces to the IRER project, connecting the low-level error to its high-level consequences.
+   * Remediation: This section must provide the specific, actionable code modification or architectural change required to bring the component into full compliance with the V11 Hardening Rubric. The instruction must be clear enough for an engineer to implement without further clarification.
+The ultimate goal of this protocol is to generate a "To-Do List" for system hardening that is free of ambiguity and primed for immediate action. This rigorous, critical process is non-negotiable. It is the engineering foundation upon which we will build a system capable of achieving the project's unprecedented scientific and cognitive goals, ensuring that as we reach for the profound, we do so from a position of unshakable stability.

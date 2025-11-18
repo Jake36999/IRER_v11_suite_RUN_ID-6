@@ -1,0 +1,1248 @@
+﻿Tab 1
+Summary
+
+
+Updated the core engine to pass the centrally generated job_uuid to both worker and validator subprocesses, enforcing a single deterministic identifier for each run. {line_range_start=45 line_range_end=71 path=draft 3/core_engine.py git_url="https://github.com/Jake36999/IRER_v11_suite_RUN_ID-6/blob/main/draft 3/core_engine.py#L45-L71"}
+
+
+Swapped worker and validator CLIs to accept --job_uuid, propagate the identifier through artifact naming, and emit provenance files keyed by the unified UUID. {line_range_start=222 line_range_end=235 path=draft 3/worker_sncgl_sdg.py git_url="https://github.com/Jake36999/IRER_v11_suite_RUN_ID-6/blob/main/draft 3/worker_sncgl_sdg.py#L222-L235"}{line_range_start=58 line_range_end=112 path=draft 3/validation_pipeline_v11.py git_url="https://github.com/Jake36999/IRER_v11_suite_RUN_ID-6/blob/main/draft 3/validation_pipeline_v11.py#L58-L112"}
+
+
+Introduced an explicit JOB_UUID_KEY configuration alias and aligned the control hub watcher to read job UUIDs from provenance payloads while preserving backward compatibility. {line_range_start=24 line_range_end=32 path=draft 3/settings.py git_url="https://github.com/Jake36999/IRER_v11_suite_RUN_ID-6/blob/main/draft 3/settings.py#L24-L32"}{line_range_start=30 line_range_end=74 path=draft 3/app.py git_url="https://github.com/Jake36999/IRER_v11_suite_RUN_ID-6/blob/main/draft 3/app.py#L30-L74"}
+
+
+Testing
+
+
+✅ python -m compileall 'draft 3/app.py' 'draft 3/core_engine.py' 'draft 3/worker_sncgl_sdg.py' 'draft 3/validation_pipeline_v11.py' 'draft 3/settings.py'
+
+diff --git a/draft 3/app.py b/draft 3/app.py
+index fda9cb744582dcd25309f4e9df8df33ebc096ac9..35f6988f85e52aac50faf973aed66100e3b65b88 100644
+--- a/draft 3/app.py        
++++ b/draft 3/app.py        
+@@ -22,51 +22,51 @@ logging.basicConfig(
+     format="%(asctime)s [%(levelname)s] (%(threadName)s) %(message)s",
+     handlers=[
+         logging.FileHandler("control_hub.log"),
+         logging.StreamHandler()
+     ]
+ )
+ 
+ # --- Configuration & Global State ---
+ PROVENANCE_DIR = settings.PROVENANCE_DIR
+ DATA_DIR = settings.DATA_DIR
+ STATUS_FILE = "hub_status.json"
+ HUNT_RUNNING_LOCK = threading.Lock()
+ g_hunt_in_progress = False
+ 
+ app = Flask(__name__)
+ 
+ class ProvenanceWatcher(FileSystemEventHandler):
+     """Watches for new provenance.json files and updates the status."""
+     def on_created(self, event):
+         if not event.is_directory and event.src_path.endswith(".json") and "provenance_" in event.src_path:
+             logging.info(f"Watcher: Detected new file: {event.src_path}")
+             try:
+                 with open(event.src_path, 'r') as f:
+                     data = json.load(f)
+ 
+-                job_uuid = data.get(settings.HASH_KEY, "unknown_uuid")
++                job_uuid = data.get(settings.JOB_UUID_KEY, "unknown_uuid")
+                 metrics = data.get("metrics", {})
+                 sse = metrics.get(settings.SSE_METRIC_KEY, 0)
+                 h_norm = metrics.get(settings.STABILITY_METRIC_KEY, 0)
+ 
+                 status_data = {
+                     "last_event": f"Analyzed {job_uuid[:8]}...",
+                     "last_sse": f"{sse:.6f}",
+                     "last_h_norm": f"{h_norm:.6f}",
+                     "last_job_id": job_uuid
+                 }
+                 self.update_status(status_data)
+             except Exception as e:
+                 logging.error(f"Watcher: Failed to process {event.src_path}: {e}")
+ 
+     def update_status(self, new_data: dict):
+         """Safely updates the central hub_status.json file."""
+         with HUNT_RUNNING_LOCK:
+             try:
+                 current_status = {}
+                 if os.path.exists(STATUS_FILE):
+                     with open(STATUS_FILE, 'r') as f:
+                         current_status = json.load(f)
+                 current_status.update(new_data)
+                 with open(STATUS_FILE, 'w') as f:
+                     json.dump(current_status, f, indent=2)
+diff --git a/draft 3/core_engine.py b/draft 3/core_engine.py
+index 00f11c6545d1d7951120ea9fb02f5a86fbfd9baf..9ca399fc4f1d15bead9e0104a23d8cf2ba1e0505 100644
+--- a/draft 3/core_engine.py        
++++ b/draft 3/core_engine.py        
+@@ -29,55 +29,55 @@ class Hunter:
+     def get_next_parameters(self, generation: int) -> Dict[str, Any]:
+         """Generates new parameters. A real implementation would use evolutionary logic."""
+         return {
+             "sncgl_epsilon": random.uniform(0.1, 0.5),
+             "sncgl_lambda": random.uniform(0.01, 0.1),
+             "sncgl_g_nonlocal": random.uniform(0.0005, 0.005),
+             "sdg_alpha": random.uniform(1.0, 2.0),
+             "sdg_rho_vac": 1.0,
+             "sdg_kappa": 1.0,
+             "sdg_eta": 0.5
+         }
+     def process_generation_results(self, job_hash: str, generation: int):
+         """Placeholder for hunter to learn from results."""
+         logging.info(f"[Hunter] Processing result for {job_hash[:8]} from generation {generation}")
+         pass
+ 
+ def generate_deterministic_hash(params: dict) -> str:
+     """Generates the content-based hash for a configuration."""
+     payload = json.dumps(params, sort_keys=True).encode("utf-8")
+     return hashlib.sha1(payload).hexdigest()[:12]
+ 
+ def run_simulation_job(job_uuid: str, config_path: str) -> bool:
+     """Executes the full worker->validator pipeline for a single job."""
+     try:
+         # 1. Execute Worker
+-        worker_cmd = ["python", WORKER_SCRIPT, "--config_hash", job_uuid, "--config_path", config_path]
++        worker_cmd = ["python", WORKER_SCRIPT, "--job_uuid", job_uuid, "--config_path", config_path]
+         subprocess.run(worker_cmd, check=True, capture_output=True, text=True, timeout=JOB_TIMEOUT_SECONDS)
+ 
+         # 2. Execute Validator
+-        validator_cmd = ["python", VALIDATOR_SCRIPT, "--config_hash", job_uuid]
++        validator_cmd = ["python", VALIDATOR_SCRIPT, "--job_uuid", job_uuid]
+         subprocess.run(validator_cmd, check=True, capture_output=True, text=True, timeout=JOB_TIMEOUT_SECONDS)
+ 
+     except subprocess.CalledProcessError as e:
+         logging.error(f"[CoreEngine] JOB FAILED for {job_uuid[:8]}. Exit code {e.returncode}")
+         logging.error(f"  STDOUT: {e.stdout}")
+         logging.error(f"  STDERR: {e.stderr}")
+         return False
+     except subprocess.TimeoutExpired:
+         logging.error(f"[CoreEngine] JOB TIMED OUT for {job_uuid[:8]}.")
+         return False
+ 
+     logging.info(f"--- [CoreEngine] JOB SUCCEEDED: {job_uuid[:8]} ---")
+     return True
+ 
+ def execute_hunt():
+     """
+     This is the refactored main() function. It is now called by app.py
+     in a background thread to run the full evolutionary hunt.
+     """
+     logging.info("[CoreEngine] V11.0 HUNT EXECUTION STARTED.")
+ 
+     os.makedirs(CONFIG_DIR, exist_ok=True)
+     os.makedirs(DATA_DIR, exist_ok=True)
+     os.makedirs(PROVENANCE_DIR, exist_ok=True)
+ 
+diff --git a/draft 3/settings.py b/draft 3/settings.py
+index c5f5b37aad145c48d121f2b51ab3ef653ffd4821..ec05483a4b8c19fe9d4739d54553c382dccd51e1 100644
+--- a/draft 3/settings.py        
++++ b/draft 3/settings.py        
+@@ -1,35 +1,38 @@
+ """Centralized configuration for the FMIA adaptive hunt."""
+ import os
+ 
+ # Core directories
+ ROOT_DIR = os.path.abspath(os.path.dirname(__file__))
+ DATA_DIR = os.path.join(ROOT_DIR, "data")
+ PROVENANCE_DIR = os.path.join(ROOT_DIR, "provenance")
+ CONFIG_DIR = os.path.join(ROOT_DIR, "configs")
+ 
+ # Ledger file for the hunter
+ LEDGER_FILE = os.path.join(ROOT_DIR, "simulation_ledger.csv")
+ 
+ # Script names for the hybrid build (worker/validator)
+ WORKER_SCRIPT = "worker_sncgl_sdg.py"
+ VALIDATOR_SCRIPT = "validation_pipeline_v11.py"
+ 
+ # --- EVOLUTIONARY HUNT PARAMETERS ---
+ NUM_GENERATIONS = 10
+ POPULATION_SIZE = 10
+ LAMBDA_FALSIFIABILITY = 0.1
+ MUTATION_RATE = 0.3
+ MUTATION_STRENGTH = 0.1
+ 
+ # --- DATA CONTRACT KEYS ---
+ # These keys MUST be used consistently across all components
+-HASH_KEY = "config_hash"
++# JOB_UUID_KEY supersedes the old HASH_KEY naming but remains compatible for
++# downstream consumers that still reference HASH_KEY.
++JOB_UUID_KEY = "job_uuid"
++HASH_KEY = JOB_UUID_KEY
+ SSE_METRIC_KEY = "log_prime_sse"
+ STABILITY_METRIC_KEY = "sdg_h_norm_l2"
+ METRIC_BLOCK_SPECTRAL = "spectral_fidelity"
+ 
+ # --- AI ASSISTANT CONFIGURATION ---
+ AI_ASSISTANT_MODE = "MOCK"  # 'MOCK' or 'GEMINI_PRO'
+ 
+ # --- RESOURCE MANAGEMENT ---
+ JOB_TIMEOUT_SECONDS = 600  # 10 minutes
+diff --git a/draft 3/validation_pipeline_v11.py b/draft 3/validation_pipeline_v11.py
+index 5ee88241fa87d604a7f73add1394e73adbd40c5d..b4b1de1714b75a4473f5e20ddc222c6dcf98b663 100644
+--- a/draft 3/validation_pipeline_v11.py        
++++ b/draft 3/validation_pipeline_v11.py        
+@@ -35,82 +35,82 @@ def calculate_log_prime_sse(rho_data: np.ndarray) -> float:
+ 
+     # Penalize flat or zero-density results
+     if variance < 1e-5: return 997.0
+ 
+     # Mock SSE based on variance as a proxy for structure
+     mock_sse = 1.0 / (1.0 + 100 * variance)
+     return float(mock_sse)
+ 
+ def calculate_pcs(rho_final_state: np.ndarray) -> float:
+     """Calculates the Phase Coherence Score (PCS)."""
+     if scipy_coherence is None: return 0.0
+     try:
+         if rho_final_state.ndim < 2 or rho_final_state.shape[0] < 4: return 0.0
+         # Extract two distinct parallel rays
+         ray_1 = rho_final_state[rho_final_state.shape[0] // 4, :]
+         ray_2 = rho_final_state[3 * rho_final_state.shape[0] // 4, :]
+         
+         _, Cxy = scipy_coherence(ray_1, ray_2)
+         pcs_score = np.mean(Cxy)
+         return float(pcs_score) if not np.isnan(pcs_score) else 0.0
+     except Exception:
+         return 0.0
+ 
+ def main():
+     parser = argparse.ArgumentParser(description="IRER V11.0 Validation Pipeline")
+-    parser.add_argument("--config_hash", required=True, help="Deterministic UUID for the run.")
++    parser.add_argument("--job_uuid", required=True, help="Deterministic UUID for the run.")
+     args = parser.parse_args()
+ 
+-    print(f"Validator starting for run: {args.config_hash}")
++    print(f"Validator starting for run: {args.job_uuid}")
+ 
+     sse = 999.0 # Default to high error if not found
+     sdg_h_norm = 999.0 # Default to high error if not found
+     pcs = 0.0 # Default to zero
+ 
+     try:
+-        h5_path = os.path.join(settings.DATA_DIR, f"rho_history_{args.config_hash}.h5") # Changed to match worker output
++        h5_path = os.path.join(settings.DATA_DIR, f"rho_history_{args.job_uuid}.h5") # Changed to match worker output
+         if not os.path.exists(h5_path):
+             raise FileNotFoundError(f"HDF5 artifact not found: {h5_path}")
+ 
+         with h5py.File(h5_path, 'r') as f:
+             # Metrics are now stored as attributes on the HDF5 file itself by the worker
+             sse = f.attrs.get(settings.SSE_METRIC_KEY, sse)
+             sdg_h_norm = f.attrs.get(settings.STABILITY_METRIC_KEY, sdg_h_norm)
+             
+             # Load final psi field for PCS and SSE calculations if needed
+             final_psi_field = f['final_psi'][()]
+             final_rho_field = np.abs(final_psi_field)**2 # Derive rho from psi
+             
+             # Recalculate SSE and PCS using derived rho
+             sse = calculate_log_prime_sse(final_rho_field)
+             pcs = calculate_pcs(final_rho_field)
+ 
+     except Exception as e:
+-        print(f"FATAL: Could not load HDF5 artifact or extract metrics for {args.config_hash}: {e}", file=sys.stderr)
++        print(f"FATAL: Could not load HDF5 artifact or extract metrics for {args.job_uuid}: {e}", file=sys.stderr)
+         # Keep default error values
+ 
+     print(f" SSE={sse:.6f}, PCS={pcs:.4f}, H-Norm={sdg_h_norm:.6f}")
+ 
+     # Assemble the provenance artifact
+     provenance_payload = {
+-        settings.HASH_KEY: args.config_hash,
++        settings.JOB_UUID_KEY: args.job_uuid,
+         "metrics": {
+             settings.SSE_METRIC_KEY: sse,
+             settings.STABILITY_METRIC_KEY: sdg_h_norm,
+             settings.METRIC_BLOCK_SPECTRAL: pcs, # Using spectral block for PCS
+         },
+         "validation_status": "COMPLETE"
+     }
+ 
+     # Save the final "receipt"
+-    output_path = os.path.join(settings.PROVENANCE_DIR, f"provenance_{args.config_hash}.json")
++    output_path = os.path.join(settings.PROVENANCE_DIR, f"provenance_{args.job_uuid}.json")
+     try:
+         os.makedirs(settings.PROVENANCE_DIR, exist_ok=True)
+         with open(output_path, 'w') as f:
+             json.dump(provenance_payload, f, indent=2)
+         print(f"Provenance file saved: {output_path}")
+     except Exception as e:
+         print(f"FATAL: Failed to write provenance file: {e}", file=sys.stderr)
+         sys.exit(1)
+ 
+ if __name__ == "__main__":
+     main()
+diff --git a/draft 3/worker_sncgl_sdg.py b/draft 3/worker_sncgl_sdg.py
+index 3d63f83b407ede7df714528bae5e8b7dc6c28afb..7d3e3255fbcd1900fbd2986f5550c7a25ce24a05 100644
+--- a/draft 3/worker_sncgl_sdg.py        
++++ b/draft 3/worker_sncgl_sdg.py        
+@@ -200,40 +200,40 @@ def run_simulation(params_path: str) -> tuple[float, float, float, jnp.ndarray,
+     return duration, sse_metric, h_norm, final_Psi, final_rho_s, final_g_munu
+ 
+ 
+ def write_results(job_uuid: str, psi_field: np.ndarray, rho_s_field: np.ndarray, g_mu_nu_field: np.ndarray, sse: float, h_norm: float):
+     """Saves simulation output and metrics to a standardized HDF5 file.
+     Now saves final Psi, rho_s, and g_mu_nu.
+     """
+     os.makedirs(settings.DATA_DIR, exist_ok=True)
+     filename = os.path.join(settings.DATA_DIR, f"rho_history_{job_uuid}.h5")
+     
+     with h5py.File(filename, "w") as f:
+         f.create_dataset("final_psi", data=psi_field)
+         f.create_dataset("final_rho_s", data=rho_s_field)
+         f.create_dataset("final_g_mu_nu", data=g_mu_nu_field)
+         
+         # Save metrics as attributes at the root for easy access by validator
+         f.attrs[settings.SSE_METRIC_KEY] = sse
+         f.attrs[settings.STABILITY_METRIC_KEY] = h_norm
+         
+     print(f"[Worker {job_uuid[:8]}] HDF5 artifact saved to: {filename}")
+ 
+ 
+ def main():
+     parser = argparse.ArgumentParser(description="V11.0 S-NCGL/SDG Co-Evolution Worker (Production Final)")
+     parser.add_argument("--config_path", required=True, help="Path to the parameter config JSON file")
+-    parser.add_argument("--config_hash", required=True, help="Unique identifier for the simulation run") # Renamed to config_hash for consistency
++    parser.add_argument("--job_uuid", required=True, help="Unique identifier for the simulation run (centrally generated)")
+     args = parser.parse_args()
+ 
+ 
+-    print(f"[Worker {args.config_hash[:8]}] Starting co-evolution simulation (Production Final) ...")
+-    
++    print(f"[Worker {args.job_uuid[:8]}] Starting co-evolution simulation (Production Final) ...")
++
+     duration, sse, h_norm, final_Psi, final_rho_s, final_g_munu = run_simulation(args.config_path)
+-    
+-    print(f"[Worker {args.config_hash[:8]}] Simulation complete in {duration:.4f}s.")
+-    
+-    write_results(args.config_hash, np.array(final_Psi), np.array(final_rho_s), np.array(final_g_munu), sse, h_norm)
++
++    print(f"[Worker {args.job_uuid[:8]}] Simulation complete in {duration:.4f}s.")
++
++    write_results(args.job_uuid, np.array(final_Psi), np.array(final_rho_s), np.array(final_g_munu), sse, h_norm)
+ 
+ 
+ if __name__ == "__main__":
+     main()
+
+
+
+
+Tab 2
+Summary
+
+
+Added a comprehensive V11.0 “HPC-SDG” build and deployment certification checklist covering architectural mandates, physics integration, validation workflows, and operational readiness criteria.
+
+
+Testing
+
+
+⚠️ Not run (documentation-only change).
+
+
+diff --git a/HPC_SDG_Build_Deployment_Checklist.md b/HPC_SDG_Build_Deployment_Checklist.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..63805af3357bae4b6ebac34dec27939340688fbb
+--- /dev/null
++++ b/HPC_SDG_Build_Deployment_Checklist.md
+@@ -0,0 +1,115 @@
++# V11.0 "HPC-SDG" Build & Deployment Certification Checklist
++
++## Introduction: Mission and Mandate
++This document serves as the definitive certification checklist for the V11.0 "HPC-SDG" suite. The V11.0 release represents a critical strategic pivot, engineered to resolve the catastrophic pipeline deadlocks, scientific paradoxes, and performance blockers that defined the V10.x campaign. This checklist codifies the non-negotiable architectural mandates, physics implementations, and operational standards required to stabilize the platform. Successful validation against every criterion herein signifies that the core architecture is sound, the physics engine is mathematically sovereign, and the integrated system is mission-ready to commence the autonomous "Parametric Search for Critical Resonance."
++
++---
++
++## 1.0 Foundational Architectural Integrity
++This section addresses the root causes of the V10.x pipeline failures, including orchestration deadlocks and Just-in-Time (JIT) compilation thrashing. The criteria outlined below are designed to establish a resilient, high-performance computational foundation capable of supporting all subsequent scientific objectives. Adherence to these architectural mandates is non-negotiable.
++
++### 1.1 Unified Hashing Mandate
++**Criterion:** System implements the Unified Hashing Mandate to resolve the "Orchestrator-Hunter Desynchronization" deadlock that plagued V10.x.
++
++1. **Deterministic Generation:** The orchestrator's hashing function is modified to remove all non-deterministic elements (e.g., `time.time()`). It must generate a deterministic hash, which serves as the run's Universally Unique Identifier (UUID), derived solely from the input parameter set.
++2. **Central Authority Passing:** The orchestrator explicitly passes this single, calculated UUID as a command-line argument (`--job_uuid`) to both the Worker (`worker_sncgl_sdg.py`) and Validator (`validation_pipeline_v11.py`) subprocesses. It is confirmed that these downstream components are mandated to receive and use this centrally-generated identifier for all artifact input/output (I/O) operations.
++
++### 1.2 Decoupled Two-Layer Execution
++**Criterion:** Architecture strictly enforces the mandated two-layer design, preventing I/O-bound analysis from stalling the primary research campaign.
++
++- **Layer 1 (JAX-Optimized HPC Core):** This layer is reserved exclusively for the high-throughput, JAX-native physics loop. It consists solely of the Hunter AI (`aste_hunter`), the S-NCGL Worker, and the SDG Geometric Solver.
++- **Layer 2 (Decoupled Secondary Analysis Suite):** All high-overhead, non-JAX, and I/O-bound analysis tasks are formally demoted to asynchronous, post-processing components. This includes BSSN constraint checking, Topological Data Analysis (TDA), and visualization generation. These components operate only after the main simulation artifact has been successfully written to disk.
++
++### 1.3 JAX HPC Compliance
++**Criterion:** Implementation of the three existential JAX High-Performance Computing (HPC) mandates required to make the co-evolutionary system computationally tractable is confirmed.
++
++1. **Control Flow Refactor:** Python `for` loops within the core time-stepping logic have been replaced with `jax.lax.scan`. This allows JAX to compile the entire simulation loop into a single, highly optimized XLA computational graph, eliminating catastrophic "compilation thrashing."
++2. **State Management:** Simulation state and parameters are managed using JAX-compliant pytrees, specifically `NamedTuple` data structures. This resolves critical JIT compilation failures related to non-hashable static arguments and ensures auditable parameter provenance.
++3. **Vectorized Operations:** `jax.vmap` is used for spatial tensor operations, such as inverting the metric field (`g_{\mu\nu}`). This vectorizes the function to run in parallel across all spatial points, resolving `TypeError` issues and unlocking massive performance gains.
++
++With the system's architectural stability confirmed, the focus now shifts to certifying the correctness of the physics engine itself.
++
++---
++
++## 2.0 Physics Core Implementation & Unification
++The V11.0 release constitutes a complete "engine swap," a strategic pivot from the falsified BSSN solver to the axiomatically correct SDG solver. This section verifies that this transition has been successfully implemented, ensuring that the simulation is, for the first time, solving the mathematically sovereign physics of the IRER framework. Successful validation here confirms the project has achieved "Foundational Closure."
++
++### 2.1 S-NCGL Axiomatic Derivation
++**Criterion:** The Sourced, Non-Local Complex Ginzburg-Landau (S-NCGL) master equation is implemented as a direct axiomatic derivation, no longer as a "borrowed analogue."
++
++- Verification confirms that the implementation in `worker_sncgl_sdg.py` is directly derived from the canonical Lagrangian density, $\mathcal{L}_{\text{FMIA}}$. This action resolves both the "Formalism Gap" and the "Parameter Provenance Gap," establishing a direct mathematical line from the theory's first principles to the simulation's executable code.
++
++### 2.2 SDG Solver Integration
++**Criterion:** The legacy Baumgarte-Shapiro-Shibata-Nakamura (BSSN) solver is fully replaced by the JAX-native Spacetime-Density Gravity (SDG) solver.
++
++- Verification confirms the BSSN check (`validation_pipeline_bssn.py`) has been formally demoted to a "Classical GR Benchmark." Its execution has been moved to the asynchronous Layer 2 analysis suite, ensuring it no longer gates the primary simulation loop or flags high-fidelity S-NCGL solutions as "physically impossible."
++
++### 2.3 End-to-End Differentiable Simulation
++**Criterion:** Integration of the JAX-native S-NCGL and SDG solvers creates an end-to-end differentiable simulation environment.
++
++- This is confirmed as a critical capability upgrade. It enables the `aste_hunter` AI to utilize `jax.grad` to receive gradients directly from the computed emergent spacetime geometry ($g_{\mu\nu}$). This allows the Hunter to actively steer the parameter search toward geometrically stable solutions, effectively using the emergent geometry itself as a high-resolution fitness function and steering away from the "numerical stiffness" regions that plagued the V10.x campaign.
++
++A correct physics engine must be paired with a rigorous and streamlined validation process to be effective.
++
++---
++
++## 3.0 Streamlined Validation & Governance
++The V11.0 validation pipeline is engineered as a streamlined, high-speed component of the HPC core. Its sole mandate is to calculate and report only the essential metrics required for the Hunter AI's fitness evaluation. This stands in stark contrast to the high-overhead, multi-modal scientific analysis that has been correctly relegated to the decoupled Layer 2 suite.
++
++### 3.1 Core Scientific & Physical Metrics
++**Criterion:** `validation_pipeline_v11.py` calculates and reports the two core metrics used for fitness evaluation.
++
++- **Scientific Fidelity:** The Log-Prime Sum of Squared Errors (SSE), which quantitatively measures the simulation's alignment with the framework's core falsifiable prediction.
++- **Physical Order:** The Phase Coherence Score (PCS), which measures the degree of ordered structure formation and acts as a proxy for a fundamental conserved charge.
++
++### 3.2 Axiomatic Integrity Check
++**Criterion:** Validation pipeline performs the "Noetherian Integrity Check."
++
++- This test verifies that the numerical evolution scheme respects the fundamental symmetries of the axiomatically derived physics. The foundational Lagrangian $\mathcal{L}_{\text{FMIA}}$ is invariant under global gauge rotation, which, by Noether’s Theorem, guarantees a conserved quantity representing total "Informational Coherence" ($Q_{\text{coherence}}$). The pipeline monitors the conservation of this quantity (using the PCS score as a proxy), providing a powerful internal validation of the physics engine's integrity.
++
++### 3.3 Data Contract Adherence
++**Criterion:** The end-to-end data contract between all Layer 1 components is intact and immutable.
++
++- Verification confirms that `validation_pipeline_v11.py` correctly receives the `--job_uuid` command-line argument.
++- It is confirmed that the validator uses this UUID to deterministically locate and load the `simulation_data_{job_uuid}.h5` artifact.
++- It is confirmed that the validator successfully writes its findings to a correctly named `provenance_{job_uuid}.json` file for consumption by the Hunter AI and the monitoring system.
++
++A fully validated build must be deployable within a functional and responsive orchestration environment.
++
++---
++
++## 4.0 Operational Readiness & Deployment
++This section certifies the V11.0 Dynamic Control Hub, a web-based control plane that replaces the non-viable Celery/Dask concept from V10.x. This new architecture is designed to be lightweight, robust, and scalable from a single Colab instance to a small virtual machine (VM) fleet. These criteria validate the hub's operational readiness for deployment.
++
++### 4.1 Non-Blocking Control Plane
++**Criterion:** The `app.py` Flask server operates as a non-blocking control plane, ensuring the user interface remains responsive during long-running simulations.
++
++- Verification confirms that the `/api/start-hunt` endpoint launches the core engine (`core_engine.execute_hunt()`) in a background thread.
++- This architecture correctly ensures the API returns an immediate HTTP 202 (Accepted) response, freeing the UI from the computational workload.
++
++### 4.2 Asynchronous Monitoring via Filesystem Watcher
++**Criterion:** The asynchronous monitoring mechanism is functional.
++
++- Verification confirms that a `ProvenanceWatcher` class, implemented using the `watchdog` library, runs in its own dedicated background thread.
++- This watcher correctly monitors the filesystem for newly created `provenance_*.json` files. Upon detection, it safely reads the artifact, extracts key metrics, and updates a central `hub_status.json` file for polling by the UI.
++
++### 4.3 Formal Deprecation of Legacy Components
++**Criterion:** Formal decommissioning of failed V10.x components and concepts is ratified.
++
++| Decommissioned Component | Reason for Deprecation |
++| --- | --- |
++| Celery/Dask Orchestration | Classified as "non-viable," "high-overhead," and "unnecessarily complex" for the current R&D and deployment context. |
++| BSSN Solver (as a primary validation gate) | Falsified by the "Stability-Fidelity Paradox." Demoted to an asynchronous, Layer 2 "Classical GR Benchmark" analysis tool. |
++| Synchronous, Monolithic Analysis Scripts | Identified as a primary cause of pipeline stalls. Replaced by the decoupled, asynchronous Layer 2 analysis architecture. |
++
++With the system's operational readiness confirmed, we turn to the final and most important criterion: the ultimate scientific goal of the V11.0 suite.
++
++---
++
++## 5.0 Final Scientific Acceptance Criterion
++
++### 5.1 Autonomous Discovery of the Log-Prime Spectral Attractor
++**Criterion:** The build and deployment are successful upon meeting the project's single, non-negotiable termination condition.
++
++- Success is formally defined as the autonomous discovery of a stable parameter regime that replicates the Log-Prime Spectral Attractor with a Sum of Squared Errors (SSE) of \(\leq 0.001\).
++- This target is anchored by the project's "gold standard" benchmarks, which include the best-run RhoSim SSE of 0.00087 and the deconvolved Spontaneous Parametric Down-Conversion (SPDC) experimental data SSE of \(\approx 0.0015\). The achievement of this quantitative threshold will transition the IRER framework from a "powerful, validated analogue" into a "complete, self-contained, computationally-realized, and empirically falsifiable fundamental theory."
+
+
+
+
+Tab 3
+Summary
+
+
+Orchestrator now passes the centrally generated job UUID to both worker and validator subprocesses, ensuring deterministic identifiers are reused end-to-end. {line_range_start=50 line_range_end=71 path=draft 3/core_engine.py git_url="https://github.com/Jake36999/IRER_v11_suite_RUN_ID-6/blob/main/draft 3/core_engine.py#L50-L71"}
+
+
+Worker accepts the --job_uuid flag, writes simulation artifacts as simulation_data_{job_uuid}.h5, and logs using the shared identifier. {line_range_start=203 line_range_end=235 path=draft 3/worker_sncgl_sdg.py git_url="https://github.com/Jake36999/IRER_v11_suite_RUN_ID-6/blob/main/draft 3/worker_sncgl_sdg.py#L203-L235"}
+
+
+Validator consumes the job UUID, reads the standardized simulation artifact, and writes provenance records keyed by job_uuid. {line_range_start=58 line_range_end=110 path=draft 3/validation_pipeline_v11.py git_url="https://github.com/Jake36999/IRER_v11_suite_RUN_ID-6/blob/main/draft 3/validation_pipeline_v11.py#L58-L110"}
+
+
+Configuration now designates job_uuid as the canonical data-contract key for run metadata. {line_range_start=24 line_range_end=29 path=draft 3/settings.py git_url="https://github.com/Jake36999/IRER_v11_suite_RUN_ID-6/blob/main/draft 3/settings.py#L24-L29"}
+
+
+diff --git a/draft 3/core_engine.py b/draft 3/core_engine.py
+index 00f11c6545d1d7951120ea9fb02f5a86fbfd9baf..9ca399fc4f1d15bead9e0104a23d8cf2ba1e0505 100644
+--- a/draft 3/core_engine.py        
++++ b/draft 3/core_engine.py        
+@@ -29,55 +29,55 @@ class Hunter:
+     def get_next_parameters(self, generation: int) -> Dict[str, Any]:
+         """Generates new parameters. A real implementation would use evolutionary logic."""
+         return {
+             "sncgl_epsilon": random.uniform(0.1, 0.5),
+             "sncgl_lambda": random.uniform(0.01, 0.1),
+             "sncgl_g_nonlocal": random.uniform(0.0005, 0.005),
+             "sdg_alpha": random.uniform(1.0, 2.0),
+             "sdg_rho_vac": 1.0,
+             "sdg_kappa": 1.0,
+             "sdg_eta": 0.5
+         }
+     def process_generation_results(self, job_hash: str, generation: int):
+         """Placeholder for hunter to learn from results."""
+         logging.info(f"[Hunter] Processing result for {job_hash[:8]} from generation {generation}")
+         pass
+ 
+ def generate_deterministic_hash(params: dict) -> str:
+     """Generates the content-based hash for a configuration."""
+     payload = json.dumps(params, sort_keys=True).encode("utf-8")
+     return hashlib.sha1(payload).hexdigest()[:12]
+ 
+ def run_simulation_job(job_uuid: str, config_path: str) -> bool:
+     """Executes the full worker->validator pipeline for a single job."""
+     try:
+         # 1. Execute Worker
+-        worker_cmd = ["python", WORKER_SCRIPT, "--config_hash", job_uuid, "--config_path", config_path]
++        worker_cmd = ["python", WORKER_SCRIPT, "--job_uuid", job_uuid, "--config_path", config_path]
+         subprocess.run(worker_cmd, check=True, capture_output=True, text=True, timeout=JOB_TIMEOUT_SECONDS)
+ 
+         # 2. Execute Validator
+-        validator_cmd = ["python", VALIDATOR_SCRIPT, "--config_hash", job_uuid]
++        validator_cmd = ["python", VALIDATOR_SCRIPT, "--job_uuid", job_uuid]
+         subprocess.run(validator_cmd, check=True, capture_output=True, text=True, timeout=JOB_TIMEOUT_SECONDS)
+ 
+     except subprocess.CalledProcessError as e:
+         logging.error(f"[CoreEngine] JOB FAILED for {job_uuid[:8]}. Exit code {e.returncode}")
+         logging.error(f"  STDOUT: {e.stdout}")
+         logging.error(f"  STDERR: {e.stderr}")
+         return False
+     except subprocess.TimeoutExpired:
+         logging.error(f"[CoreEngine] JOB TIMED OUT for {job_uuid[:8]}.")
+         return False
+ 
+     logging.info(f"--- [CoreEngine] JOB SUCCEEDED: {job_uuid[:8]} ---")
+     return True
+ 
+ def execute_hunt():
+     """
+     This is the refactored main() function. It is now called by app.py
+     in a background thread to run the full evolutionary hunt.
+     """
+     logging.info("[CoreEngine] V11.0 HUNT EXECUTION STARTED.")
+ 
+     os.makedirs(CONFIG_DIR, exist_ok=True)
+     os.makedirs(DATA_DIR, exist_ok=True)
+     os.makedirs(PROVENANCE_DIR, exist_ok=True)
+ 
+diff --git a/draft 3/settings.py b/draft 3/settings.py
+index c5f5b37aad145c48d121f2b51ab3ef653ffd4821..ca22193b0114dbb0f3c67b2a1078b63691ca350b 100644
+--- a/draft 3/settings.py        
++++ b/draft 3/settings.py        
+@@ -1,35 +1,35 @@
+ """Centralized configuration for the FMIA adaptive hunt."""
+ import os
+ 
+ # Core directories
+ ROOT_DIR = os.path.abspath(os.path.dirname(__file__))
+ DATA_DIR = os.path.join(ROOT_DIR, "data")
+ PROVENANCE_DIR = os.path.join(ROOT_DIR, "provenance")
+ CONFIG_DIR = os.path.join(ROOT_DIR, "configs")
+ 
+ # Ledger file for the hunter
+ LEDGER_FILE = os.path.join(ROOT_DIR, "simulation_ledger.csv")
+ 
+ # Script names for the hybrid build (worker/validator)
+ WORKER_SCRIPT = "worker_sncgl_sdg.py"
+ VALIDATOR_SCRIPT = "validation_pipeline_v11.py"
+ 
+ # --- EVOLUTIONARY HUNT PARAMETERS ---
+ NUM_GENERATIONS = 10
+ POPULATION_SIZE = 10
+ LAMBDA_FALSIFIABILITY = 0.1
+ MUTATION_RATE = 0.3
+ MUTATION_STRENGTH = 0.1
+ 
+ # --- DATA CONTRACT KEYS ---
+ # These keys MUST be used consistently across all components
+-HASH_KEY = "config_hash"
++HASH_KEY = "job_uuid"
+ SSE_METRIC_KEY = "log_prime_sse"
+ STABILITY_METRIC_KEY = "sdg_h_norm_l2"
+ METRIC_BLOCK_SPECTRAL = "spectral_fidelity"
+ 
+ # --- AI ASSISTANT CONFIGURATION ---
+ AI_ASSISTANT_MODE = "MOCK"  # 'MOCK' or 'GEMINI_PRO'
+ 
+ # --- RESOURCE MANAGEMENT ---
+ JOB_TIMEOUT_SECONDS = 600  # 10 minutes
+diff --git a/draft 3/validation_pipeline_v11.py b/draft 3/validation_pipeline_v11.py
+index 5ee88241fa87d604a7f73add1394e73adbd40c5d..d1452c12c8c34094e76cf4186719cc6ff5017422 100644
+--- a/draft 3/validation_pipeline_v11.py        
++++ b/draft 3/validation_pipeline_v11.py        
+@@ -35,82 +35,82 @@ def calculate_log_prime_sse(rho_data: np.ndarray) -> float:
+ 
+     # Penalize flat or zero-density results
+     if variance < 1e-5: return 997.0
+ 
+     # Mock SSE based on variance as a proxy for structure
+     mock_sse = 1.0 / (1.0 + 100 * variance)
+     return float(mock_sse)
+ 
+ def calculate_pcs(rho_final_state: np.ndarray) -> float:
+     """Calculates the Phase Coherence Score (PCS)."""
+     if scipy_coherence is None: return 0.0
+     try:
+         if rho_final_state.ndim < 2 or rho_final_state.shape[0] < 4: return 0.0
+         # Extract two distinct parallel rays
+         ray_1 = rho_final_state[rho_final_state.shape[0] // 4, :]
+         ray_2 = rho_final_state[3 * rho_final_state.shape[0] // 4, :]
+         
+         _, Cxy = scipy_coherence(ray_1, ray_2)
+         pcs_score = np.mean(Cxy)
+         return float(pcs_score) if not np.isnan(pcs_score) else 0.0
+     except Exception:
+         return 0.0
+ 
+ def main():
+     parser = argparse.ArgumentParser(description="IRER V11.0 Validation Pipeline")
+-    parser.add_argument("--config_hash", required=True, help="Deterministic UUID for the run.")
++    parser.add_argument("--job_uuid", required=True, help="Deterministic UUID for the run.")
+     args = parser.parse_args()
+ 
+-    print(f"Validator starting for run: {args.config_hash}")
++    print(f"Validator starting for run: {args.job_uuid}")
+ 
+     sse = 999.0 # Default to high error if not found
+     sdg_h_norm = 999.0 # Default to high error if not found
+     pcs = 0.0 # Default to zero
+ 
+     try:
+-        h5_path = os.path.join(settings.DATA_DIR, f"rho_history_{args.config_hash}.h5") # Changed to match worker output
++        h5_path = os.path.join(settings.DATA_DIR, f"simulation_data_{args.job_uuid}.h5")
+         if not os.path.exists(h5_path):
+             raise FileNotFoundError(f"HDF5 artifact not found: {h5_path}")
+ 
+         with h5py.File(h5_path, 'r') as f:
+             # Metrics are now stored as attributes on the HDF5 file itself by the worker
+             sse = f.attrs.get(settings.SSE_METRIC_KEY, sse)
+             sdg_h_norm = f.attrs.get(settings.STABILITY_METRIC_KEY, sdg_h_norm)
+             
+             # Load final psi field for PCS and SSE calculations if needed
+             final_psi_field = f['final_psi'][()]
+             final_rho_field = np.abs(final_psi_field)**2 # Derive rho from psi
+             
+             # Recalculate SSE and PCS using derived rho
+             sse = calculate_log_prime_sse(final_rho_field)
+             pcs = calculate_pcs(final_rho_field)
+ 
+     except Exception as e:
+-        print(f"FATAL: Could not load HDF5 artifact or extract metrics for {args.config_hash}: {e}", file=sys.stderr)
++        print(f"FATAL: Could not load HDF5 artifact or extract metrics for {args.job_uuid}: {e}", file=sys.stderr)
+         # Keep default error values
+ 
+     print(f" SSE={sse:.6f}, PCS={pcs:.4f}, H-Norm={sdg_h_norm:.6f}")
+ 
+     # Assemble the provenance artifact
+     provenance_payload = {
+-        settings.HASH_KEY: args.config_hash,
++        settings.HASH_KEY: args.job_uuid,
+         "metrics": {
+             settings.SSE_METRIC_KEY: sse,
+             settings.STABILITY_METRIC_KEY: sdg_h_norm,
+             settings.METRIC_BLOCK_SPECTRAL: pcs, # Using spectral block for PCS
+         },
+         "validation_status": "COMPLETE"
+     }
+ 
+     # Save the final "receipt"
+-    output_path = os.path.join(settings.PROVENANCE_DIR, f"provenance_{args.config_hash}.json")
++    output_path = os.path.join(settings.PROVENANCE_DIR, f"provenance_{args.job_uuid}.json")
+     try:
+         os.makedirs(settings.PROVENANCE_DIR, exist_ok=True)
+         with open(output_path, 'w') as f:
+             json.dump(provenance_payload, f, indent=2)
+         print(f"Provenance file saved: {output_path}")
+     except Exception as e:
+         print(f"FATAL: Failed to write provenance file: {e}", file=sys.stderr)
+         sys.exit(1)
+ 
+ if __name__ == "__main__":
+     main()
+diff --git a/draft 3/worker_sncgl_sdg.py b/draft 3/worker_sncgl_sdg.py
+index 3d63f83b407ede7df714528bae5e8b7dc6c28afb..6bf3e55c47e58f16300686f35d2272e955226401 100644
+--- a/draft 3/worker_sncgl_sdg.py        
++++ b/draft 3/worker_sncgl_sdg.py        
+@@ -183,57 +183,57 @@ def run_simulation(params_path: str) -> tuple[float, float, float, jnp.ndarray,
+         spatial_resolution=grid_size,
+         sdg_alpha=params["sdg_alpha"],
+         sdg_rho_vac=params["sdg_rho_vac"],
+         dt=dt
+     )
+ 
+     initial_carry = (Psi_initial, rho_s_initial, g_initial)
+     (final_Psi, final_rho_s, final_g_munu), _ = jax.lax.scan(rk4_step_fn, initial_carry, None, length=steps)
+     
+     # Ensure computation is finished before stopping timer
+     final_Psi.block_until_ready()
+     duration = time.time() - start_time
+     
+     # Calculate final metrics from simulation state (now using the final state from RK4)
+     sse_metric = calculate_final_sse(final_Psi)
+     h_norm = calculate_h_norm(final_g_munu, grid_size)
+     
+     return duration, sse_metric, h_norm, final_Psi, final_rho_s, final_g_munu
+ 
+ 
+ def write_results(job_uuid: str, psi_field: np.ndarray, rho_s_field: np.ndarray, g_mu_nu_field: np.ndarray, sse: float, h_norm: float):
+     """Saves simulation output and metrics to a standardized HDF5 file.
+     Now saves final Psi, rho_s, and g_mu_nu.
+     """
+     os.makedirs(settings.DATA_DIR, exist_ok=True)
+-    filename = os.path.join(settings.DATA_DIR, f"rho_history_{job_uuid}.h5")
++    filename = os.path.join(settings.DATA_DIR, f"simulation_data_{job_uuid}.h5")
+     
+     with h5py.File(filename, "w") as f:
+         f.create_dataset("final_psi", data=psi_field)
+         f.create_dataset("final_rho_s", data=rho_s_field)
+         f.create_dataset("final_g_mu_nu", data=g_mu_nu_field)
+         
+         # Save metrics as attributes at the root for easy access by validator
+         f.attrs[settings.SSE_METRIC_KEY] = sse
+         f.attrs[settings.STABILITY_METRIC_KEY] = h_norm
+         
+     print(f"[Worker {job_uuid[:8]}] HDF5 artifact saved to: {filename}")
+ 
+ 
+ def main():
+     parser = argparse.ArgumentParser(description="V11.0 S-NCGL/SDG Co-Evolution Worker (Production Final)")
+     parser.add_argument("--config_path", required=True, help="Path to the parameter config JSON file")
+-    parser.add_argument("--config_hash", required=True, help="Unique identifier for the simulation run") # Renamed to config_hash for consistency
++    parser.add_argument("--job_uuid", required=True, help="Centralized deterministic UUID for the simulation run")
+     args = parser.parse_args()
+ 
+ 
+-    print(f"[Worker {args.config_hash[:8]}] Starting co-evolution simulation (Production Final) ...")
+-    
++    print(f"[Worker {args.job_uuid[:8]}] Starting co-evolution simulation (Production Final) ...")
++
+     duration, sse, h_norm, final_Psi, final_rho_s, final_g_munu = run_simulation(args.config_path)
+-    
+-    print(f"[Worker {args.config_hash[:8]}] Simulation complete in {duration:.4f}s.")
+-    
+-    write_results(args.config_hash, np.array(final_Psi), np.array(final_rho_s), np.array(final_g_munu), sse, h_norm)
++
++    print(f"[Worker {args.job_uuid[:8]}] Simulation complete in {duration:.4f}s.")
++
++    write_results(args.job_uuid, np.array(final_Psi), np.array(final_rho_s), np.array(final_g_munu), sse, h_norm)
+ 
+ 
+ if __name__ == "__main__":
+     main()
+
+
+
+
+Tab 4
+diff --git a/draft 3/aste_hunter.py b/draft 3/aste_hunter.py
+index 84663507342f0610f63e8a01f684c2e2201c5a5f..29464536da94292bf650e9f3b71fd895d86542bb 100644
+--- a/draft 3/aste_hunter.py        
++++ b/draft 3/aste_hunter.py        
+@@ -7,51 +7,51 @@ GOAL: Acts as the "Brain" of the ASTE. It reads validation reports
+       valid simulation regimes.
+ """
+ 
+ 
+ import os
+ import csv
+ import json
+ import math
+ import random
+ import sys
+ import numpy as np
+ from typing import List, Dict, Any, Optional
+ 
+ 
+ try:
+     import settings
+ except ImportError:
+     print("FATAL: settings.py not found.", file=sys.stderr)
+     sys.exit(1)
+ 
+ 
+ # --- Constants from settings ---
+ LEDGER_FILE = settings.LEDGER_FILE
+ PROVENANCE_DIR = settings.PROVENANCE_DIR
+ SSE_METRIC_KEY = "log_prime_sse"
+-HASH_KEY = "config_hash"
++HASH_KEY = settings.HASH_KEY
+ LAMBDA_FALSIFIABILITY = settings.LAMBDA_FALSIFIABILITY
+ MUTATION_RATE = settings.MUTATION_RATE
+ MUTATION_STRENGTH = settings.MUTATION_STRENGTH
+ TOURNAMENT_SIZE = 3
+ 
+ 
+ class Hunter:
+     def __init__(self, ledger_file: str = LEDGER_FILE):
+         self.ledger_file = ledger_file
+         self.fieldnames = [
+             HASH_KEY, SSE_METRIC_KEY, "fitness", "generation",
+             "param_kappa", "param_sigma_k", "param_alpha",
+             "sse_null_phase_scramble", "sse_null_target_shuffle"
+         ]
+         self.population = self._load_ledger()
+         print(f"[Hunter] Initialized. Loaded {len(self.population)} runs from {self.ledger_file}")
+ 
+ 
+     def _load_ledger(self) -> List[Dict[str, Any]]:
+         if not os.path.exists(self.ledger_file):
+             with open(self.ledger_file, 'w', newline='') as f:
+                 writer = csv.DictWriter(f, fieldnames=self.fieldnames)
+                 writer.writeheader()
+             return []
+ 
+@@ -63,52 +63,52 @@ class Hunter:
+                 for key in row:
+                     try:
+                         row[key] = float(row[key]) if row[key] else None
+                     except (ValueError, TypeError):
+                         pass
+                 population.append(row)
+         return population
+ 
+ 
+     def _save_ledger(self):
+         with open(self.ledger_file, 'w', newline='') as f:
+             writer = csv.DictWriter(f, fieldnames=self.fieldnames, extrasaction='ignore')
+             writer.writeheader()
+             writer.writerows(self.population)
+         print(f"[Hunter] Ledger saved with {len(self.population)} runs.")
+ 
+ 
+     def process_generation_results(self):
+         print(f"[Hunter] Processing new results from {PROVENANCE_DIR}...")
+         processed_count = 0
+         for run in self.population:
+             if run.get('fitness') is not None:
+                 continue
+ 
+ 
+-            config_hash = run[HASH_KEY]
+-            prov_file = os.path.join(PROVENANCE_DIR, f"provenance_{config_hash}.json")
++            job_uuid = run[HASH_KEY]
++            prov_file = os.path.join(PROVENANCE_DIR, f"provenance_{job_uuid}.json")
+             if not os.path.exists(prov_file):
+                 continue
+ 
+ 
+             try:
+                 with open(prov_file, 'r') as f:
+                     provenance = json.load(f)
+ 
+ 
+                 spec = provenance.get("spectral_fidelity", {})
+                 sse = float(spec.get("log_prime_sse", 1002.0))
+                 sse_null_a = float(spec.get("sse_null_phase_scramble", 1002.0))
+                 sse_null_b = float(spec.get("sse_null_target_shuffle", 1002.0))
+ 
+ 
+                 sse_null_a = min(sse_null_a, 1000.0)
+                 sse_null_b = min(sse_null_b, 1000.0)
+ 
+ 
+                 fitness = 0.0
+                 if math.isfinite(sse) and sse < 900.0:
+                     base_fitness = 1.0 / max(sse, 1e-12)
+                     delta_a = max(0.0, sse_null_a - sse)
+                     delta_b = max(0.0, sse_null_b - sse)
+                     bonus = LAMBDA_FALSIFIABILITY * (delta_a + delta_b)
+diff --git a/draft 3/core_engine.py b/draft 3/core_engine.py
+index 00f11c6545d1d7951120ea9fb02f5a86fbfd9baf..9ca399fc4f1d15bead9e0104a23d8cf2ba1e0505 100644
+--- a/draft 3/core_engine.py        
++++ b/draft 3/core_engine.py        
+@@ -29,55 +29,55 @@ class Hunter:
+     def get_next_parameters(self, generation: int) -> Dict[str, Any]:
+         """Generates new parameters. A real implementation would use evolutionary logic."""
+         return {
+             "sncgl_epsilon": random.uniform(0.1, 0.5),
+             "sncgl_lambda": random.uniform(0.01, 0.1),
+             "sncgl_g_nonlocal": random.uniform(0.0005, 0.005),
+             "sdg_alpha": random.uniform(1.0, 2.0),
+             "sdg_rho_vac": 1.0,
+             "sdg_kappa": 1.0,
+             "sdg_eta": 0.5
+         }
+     def process_generation_results(self, job_hash: str, generation: int):
+         """Placeholder for hunter to learn from results."""
+         logging.info(f"[Hunter] Processing result for {job_hash[:8]} from generation {generation}")
+         pass
+ 
+ def generate_deterministic_hash(params: dict) -> str:
+     """Generates the content-based hash for a configuration."""
+     payload = json.dumps(params, sort_keys=True).encode("utf-8")
+     return hashlib.sha1(payload).hexdigest()[:12]
+ 
+ def run_simulation_job(job_uuid: str, config_path: str) -> bool:
+     """Executes the full worker->validator pipeline for a single job."""
+     try:
+         # 1. Execute Worker
+-        worker_cmd = ["python", WORKER_SCRIPT, "--config_hash", job_uuid, "--config_path", config_path]
++        worker_cmd = ["python", WORKER_SCRIPT, "--job_uuid", job_uuid, "--config_path", config_path]
+         subprocess.run(worker_cmd, check=True, capture_output=True, text=True, timeout=JOB_TIMEOUT_SECONDS)
+ 
+         # 2. Execute Validator
+-        validator_cmd = ["python", VALIDATOR_SCRIPT, "--config_hash", job_uuid]
++        validator_cmd = ["python", VALIDATOR_SCRIPT, "--job_uuid", job_uuid]
+         subprocess.run(validator_cmd, check=True, capture_output=True, text=True, timeout=JOB_TIMEOUT_SECONDS)
+ 
+     except subprocess.CalledProcessError as e:
+         logging.error(f"[CoreEngine] JOB FAILED for {job_uuid[:8]}. Exit code {e.returncode}")
+         logging.error(f"  STDOUT: {e.stdout}")
+         logging.error(f"  STDERR: {e.stderr}")
+         return False
+     except subprocess.TimeoutExpired:
+         logging.error(f"[CoreEngine] JOB TIMED OUT for {job_uuid[:8]}.")
+         return False
+ 
+     logging.info(f"--- [CoreEngine] JOB SUCCEEDED: {job_uuid[:8]} ---")
+     return True
+ 
+ def execute_hunt():
+     """
+     This is the refactored main() function. It is now called by app.py
+     in a background thread to run the full evolutionary hunt.
+     """
+     logging.info("[CoreEngine] V11.0 HUNT EXECUTION STARTED.")
+ 
+     os.makedirs(CONFIG_DIR, exist_ok=True)
+     os.makedirs(DATA_DIR, exist_ok=True)
+     os.makedirs(PROVENANCE_DIR, exist_ok=True)
+ 
+diff --git a/draft 3/settings.py b/draft 3/settings.py
+index c5f5b37aad145c48d121f2b51ab3ef653ffd4821..ca22193b0114dbb0f3c67b2a1078b63691ca350b 100644
+--- a/draft 3/settings.py        
++++ b/draft 3/settings.py        
+@@ -1,35 +1,35 @@
+ """Centralized configuration for the FMIA adaptive hunt."""
+ import os
+ 
+ # Core directories
+ ROOT_DIR = os.path.abspath(os.path.dirname(__file__))
+ DATA_DIR = os.path.join(ROOT_DIR, "data")
+ PROVENANCE_DIR = os.path.join(ROOT_DIR, "provenance")
+ CONFIG_DIR = os.path.join(ROOT_DIR, "configs")
+ 
+ # Ledger file for the hunter
+ LEDGER_FILE = os.path.join(ROOT_DIR, "simulation_ledger.csv")
+ 
+ # Script names for the hybrid build (worker/validator)
+ WORKER_SCRIPT = "worker_sncgl_sdg.py"
+ VALIDATOR_SCRIPT = "validation_pipeline_v11.py"
+ 
+ # --- EVOLUTIONARY HUNT PARAMETERS ---
+ NUM_GENERATIONS = 10
+ POPULATION_SIZE = 10
+ LAMBDA_FALSIFIABILITY = 0.1
+ MUTATION_RATE = 0.3
+ MUTATION_STRENGTH = 0.1
+ 
+ # --- DATA CONTRACT KEYS ---
+ # These keys MUST be used consistently across all components
+-HASH_KEY = "config_hash"
++HASH_KEY = "job_uuid"
+ SSE_METRIC_KEY = "log_prime_sse"
+ STABILITY_METRIC_KEY = "sdg_h_norm_l2"
+ METRIC_BLOCK_SPECTRAL = "spectral_fidelity"
+ 
+ # --- AI ASSISTANT CONFIGURATION ---
+ AI_ASSISTANT_MODE = "MOCK"  # 'MOCK' or 'GEMINI_PRO'
+ 
+ # --- RESOURCE MANAGEMENT ---
+ JOB_TIMEOUT_SECONDS = 600  # 10 minutes
+diff --git a/draft 3/validation_pipeline_bssn.py b/draft 3/validation_pipeline_bssn.py
+index ee3320feea92716a93b71ea502b48f3cb5cdff59..9ba77790eb552317d43d3d4e098c89821091c8e4 100644
+--- a/draft 3/validation_pipeline_bssn.py        
++++ b/draft 3/validation_pipeline_bssn.py        
+@@ -1,88 +1,89 @@
+ 
+ CLASSIFICATION: Decoupled Layer 2 Analysis Component
+ GOAL: Serves as the legacy validator for geometric stability. This script
+       formalizes the BSSN Hamiltonian constraint check as a decoupled,
+       post-processing module. Its purpose is to continue benchmarking the
+       S-NCGL physics core against classical geometric constraints, providing the
+       quantitative "H_Norm_L2" metric essential for diagnosing the
+       "Stability-Fidelity Paradox."
+ 
+       This script is data-hostile and operates on existing simulation artifacts.
+-      It expects a config_hash to locate the correct rho_history.h5 file
++      It expects a job_uuid to locate the correct simulation_data.h5 file
+       and updates the corresponding provenance.json with its findings.
+ 
+ import argparse
+ import json
+ from pathlib import Path
+ import h5py
+ import numpy as np
+ import sys
+ 
+ # Assume settings.py defines the directory structure
+ try:
+     import settings
+ except ImportError:
+     print("FATAL: 'settings.py' not found.", file=sys.stderr)
+     sys.exit(1)
+ 
+ 
+ def calculate_bssn_h_norm(rho_state: np.ndarray) -> float:
+     """
+     Calculates the L2 norm of the BSSN Hamiltonian constraint violation.
+     This function numerically implements the constraint check on a given rho
+     field state, returning the H-Norm L2 metric.
+     """
+     if rho_state.ndim < 2:
+         return np.nan
+     gradients = np.gradient(rho_state)
+     laplacian = sum(np.gradient(g)[i] for i, g in enumerate(gradients))
+     curvature = rho_state + laplacian
+     h_norm = np.sqrt(np.mean(curvature**2))
+     return float(h_norm)
+ 
+ 
+ def main():
+     """Main execution block."""
+     parser = argparse.ArgumentParser(description="Legacy BSSN H-Norm L2 Validator.")
+-    parser.add_argument("--config_hash", type=str, required=True, help="Deterministic UUID of the run to analyze.")
++    parser.add_argument("--job_uuid", type=str, required=True, help="Deterministic UUID of the run to analyze.")
+     args = parser.parse_args()
+ 
+-
+-    data_filepath = Path(settings.DATA_DIR) / f"rho_history_{args.config_hash}.h5"
+-    provenance_filepath = Path(settings.PROVENANCE_DIR) / f"provenance_{args.config_hash}.json"
++    data_filepath = Path(settings.DATA_DIR) / f"simulation_data_{args.job_uuid}.h5"
++    provenance_filepath = Path(settings.PROVENANCE_DIR) / f"provenance_{args.job_uuid}.json"
+ 
+ 
+     print(f"--- Legacy BSSN Validator ---")
+-    print(f"  Analyzing Run ID: {args.config_hash}")
++    print(f"  Analyzing Run ID: {args.job_uuid}")
+ 
+ 
+     # 1. Load simulation artifact
+     try:
+         with h5py.File(data_filepath, 'r') as f:
+-            # Load the final state of the rho field
+-            final_rho_state = f['rho_history'][-1]
++            # Derive the rho field from the stored final psi state
++            if 'final_psi' not in f:
++                raise KeyError("final_psi dataset missing from simulation artifact")
++            final_rho_state = np.abs(f['final_psi'][()]) ** 2
+     except FileNotFoundError:
+         print(f"CRITICAL_FAIL: Artifact not found: {data_filepath}", file=sys.stderr)
+         sys.exit(1)
+     except Exception as e:
+         print(f"CRITICAL_FAIL: Could not load HDF5 artifact: {e}", file=sys.stderr)
+         sys.exit(1)
+ 
+ 
+     # 2. Calculate H-Norm L2
+     h_norm_l2 = calculate_bssn_h_norm(final_rho_state)
+     print(f"  Calculated H-Norm L2: {h_norm_l2:.6f}")
+ 
+ 
+     # 3. Update Provenance Report
+     provenance_data = {}
+     if provenance_filepath.exists():
+         try:
+             with open(provenance_filepath, 'r') as f:
+                 provenance_data = json.load(f)
+         except json.JSONDecodeError:
+             print(f"WARNING: Could not decode existing provenance file. A new file will be created.")
+     
+     # Update the loaded dictionary in-memory; do not replace it.
+     provenance_data["geometric_constraint_violations"] = {
+         "H_Norm_L2": h_norm_l2
+diff --git a/draft 3/validation_pipeline_v11.py b/draft 3/validation_pipeline_v11.py
+index 5ee88241fa87d604a7f73add1394e73adbd40c5d..8c8277f58b6109272fd99d80539e547191a5157c 100644
+--- a/draft 3/validation_pipeline_v11.py        
++++ b/draft 3/validation_pipeline_v11.py        
+@@ -35,82 +35,82 @@ def calculate_log_prime_sse(rho_data: np.ndarray) -> float:
+ 
+     # Penalize flat or zero-density results
+     if variance < 1e-5: return 997.0
+ 
+     # Mock SSE based on variance as a proxy for structure
+     mock_sse = 1.0 / (1.0 + 100 * variance)
+     return float(mock_sse)
+ 
+ def calculate_pcs(rho_final_state: np.ndarray) -> float:
+     """Calculates the Phase Coherence Score (PCS)."""
+     if scipy_coherence is None: return 0.0
+     try:
+         if rho_final_state.ndim < 2 or rho_final_state.shape[0] < 4: return 0.0
+         # Extract two distinct parallel rays
+         ray_1 = rho_final_state[rho_final_state.shape[0] // 4, :]
+         ray_2 = rho_final_state[3 * rho_final_state.shape[0] // 4, :]
+         
+         _, Cxy = scipy_coherence(ray_1, ray_2)
+         pcs_score = np.mean(Cxy)
+         return float(pcs_score) if not np.isnan(pcs_score) else 0.0
+     except Exception:
+         return 0.0
+ 
+ def main():
+     parser = argparse.ArgumentParser(description="IRER V11.0 Validation Pipeline")
+-    parser.add_argument("--config_hash", required=True, help="Deterministic UUID for the run.")
++    parser.add_argument("--job_uuid", required=True, help="Deterministic UUID for the run provided by the orchestrator.")
+     args = parser.parse_args()
+ 
+-    print(f"Validator starting for run: {args.config_hash}")
++    print(f"Validator starting for run: {args.job_uuid}")
+ 
+     sse = 999.0 # Default to high error if not found
+     sdg_h_norm = 999.0 # Default to high error if not found
+     pcs = 0.0 # Default to zero
+ 
+     try:
+-        h5_path = os.path.join(settings.DATA_DIR, f"rho_history_{args.config_hash}.h5") # Changed to match worker output
++        h5_path = os.path.join(settings.DATA_DIR, f"simulation_data_{args.job_uuid}.h5")
+         if not os.path.exists(h5_path):
+             raise FileNotFoundError(f"HDF5 artifact not found: {h5_path}")
+ 
+         with h5py.File(h5_path, 'r') as f:
+             # Metrics are now stored as attributes on the HDF5 file itself by the worker
+             sse = f.attrs.get(settings.SSE_METRIC_KEY, sse)
+             sdg_h_norm = f.attrs.get(settings.STABILITY_METRIC_KEY, sdg_h_norm)
+             
+             # Load final psi field for PCS and SSE calculations if needed
+             final_psi_field = f['final_psi'][()]
+             final_rho_field = np.abs(final_psi_field)**2 # Derive rho from psi
+             
+             # Recalculate SSE and PCS using derived rho
+             sse = calculate_log_prime_sse(final_rho_field)
+             pcs = calculate_pcs(final_rho_field)
+ 
+     except Exception as e:
+-        print(f"FATAL: Could not load HDF5 artifact or extract metrics for {args.config_hash}: {e}", file=sys.stderr)
++        print(f"FATAL: Could not load HDF5 artifact or extract metrics for {args.job_uuid}: {e}", file=sys.stderr)
+         # Keep default error values
+ 
+     print(f" SSE={sse:.6f}, PCS={pcs:.4f}, H-Norm={sdg_h_norm:.6f}")
+ 
+     # Assemble the provenance artifact
+     provenance_payload = {
+-        settings.HASH_KEY: args.config_hash,
++        settings.HASH_KEY: args.job_uuid,
+         "metrics": {
+             settings.SSE_METRIC_KEY: sse,
+             settings.STABILITY_METRIC_KEY: sdg_h_norm,
+             settings.METRIC_BLOCK_SPECTRAL: pcs, # Using spectral block for PCS
+         },
+         "validation_status": "COMPLETE"
+     }
+ 
+     # Save the final "receipt"
+-    output_path = os.path.join(settings.PROVENANCE_DIR, f"provenance_{args.config_hash}.json")
++    output_path = os.path.join(settings.PROVENANCE_DIR, f"provenance_{args.job_uuid}.json")
+     try:
+         os.makedirs(settings.PROVENANCE_DIR, exist_ok=True)
+         with open(output_path, 'w') as f:
+             json.dump(provenance_payload, f, indent=2)
+         print(f"Provenance file saved: {output_path}")
+     except Exception as e:
+         print(f"FATAL: Failed to write provenance file: {e}", file=sys.stderr)
+         sys.exit(1)
+ 
+ if __name__ == "__main__":
+     main()
+diff --git a/draft 3/worker_sncgl_sdg.py b/draft 3/worker_sncgl_sdg.py
+index 3d63f83b407ede7df714528bae5e8b7dc6c28afb..1ec7f9212b35fac35f74fa884b8a582563243da0 100644
+--- a/draft 3/worker_sncgl_sdg.py        
++++ b/draft 3/worker_sncgl_sdg.py        
+@@ -183,57 +183,57 @@ def run_simulation(params_path: str) -> tuple[float, float, float, jnp.ndarray,
+         spatial_resolution=grid_size,
+         sdg_alpha=params["sdg_alpha"],
+         sdg_rho_vac=params["sdg_rho_vac"],
+         dt=dt
+     )
+ 
+     initial_carry = (Psi_initial, rho_s_initial, g_initial)
+     (final_Psi, final_rho_s, final_g_munu), _ = jax.lax.scan(rk4_step_fn, initial_carry, None, length=steps)
+     
+     # Ensure computation is finished before stopping timer
+     final_Psi.block_until_ready()
+     duration = time.time() - start_time
+     
+     # Calculate final metrics from simulation state (now using the final state from RK4)
+     sse_metric = calculate_final_sse(final_Psi)
+     h_norm = calculate_h_norm(final_g_munu, grid_size)
+     
+     return duration, sse_metric, h_norm, final_Psi, final_rho_s, final_g_munu
+ 
+ 
+ def write_results(job_uuid: str, psi_field: np.ndarray, rho_s_field: np.ndarray, g_mu_nu_field: np.ndarray, sse: float, h_norm: float):
+     """Saves simulation output and metrics to a standardized HDF5 file.
+     Now saves final Psi, rho_s, and g_mu_nu.
+     """
+     os.makedirs(settings.DATA_DIR, exist_ok=True)
+-    filename = os.path.join(settings.DATA_DIR, f"rho_history_{job_uuid}.h5")
++    filename = os.path.join(settings.DATA_DIR, f"simulation_data_{job_uuid}.h5")
+     
+     with h5py.File(filename, "w") as f:
+         f.create_dataset("final_psi", data=psi_field)
+         f.create_dataset("final_rho_s", data=rho_s_field)
+         f.create_dataset("final_g_mu_nu", data=g_mu_nu_field)
+         
+         # Save metrics as attributes at the root for easy access by validator
+         f.attrs[settings.SSE_METRIC_KEY] = sse
+         f.attrs[settings.STABILITY_METRIC_KEY] = h_norm
+         
+     print(f"[Worker {job_uuid[:8]}] HDF5 artifact saved to: {filename}")
+ 
+ 
+ def main():
+     parser = argparse.ArgumentParser(description="V11.0 S-NCGL/SDG Co-Evolution Worker (Production Final)")
+     parser.add_argument("--config_path", required=True, help="Path to the parameter config JSON file")
+-    parser.add_argument("--config_hash", required=True, help="Unique identifier for the simulation run") # Renamed to config_hash for consistency
++    parser.add_argument("--job_uuid", required=True, help="Unique identifier for the simulation run derived by the orchestrator")
+     args = parser.parse_args()
+ 
+ 
+-    print(f"[Worker {args.config_hash[:8]}] Starting co-evolution simulation (Production Final) ...")
+-    
++    print(f"[Worker {args.job_uuid[:8]}] Starting co-evolution simulation (Production Final) ...")
++
+     duration, sse, h_norm, final_Psi, final_rho_s, final_g_munu = run_simulation(args.config_path)
+-    
+-    print(f"[Worker {args.config_hash[:8]}] Simulation complete in {duration:.4f}s.")
+-    
+-    write_results(args.config_hash, np.array(final_Psi), np.array(final_rho_s), np.array(final_g_munu), sse, h_norm)
++
++    print(f"[Worker {args.job_uuid[:8]}] Simulation complete in {duration:.4f}s.")
++
++    write_results(args.job_uuid, np.array(final_Psi), np.array(final_rho_s), np.array(final_g_munu), sse, h_norm)
+ 
+ 
+ if __name__ == "__main__":
+     main()
+Summary
+
+
+Standardized the shared HASH_KEY to job_uuid to enforce a single identifier across the suite’s data contract.{line_range_start=24 line_range_end=28 path=draft 3/settings.py git_url="https://github.com/Jake36999/IRER_v11_suite_RUN_ID-6/blob/main/draft 3/settings.py#L24-L28"}
+
+
+Updated the orchestrator to pass the centrally generated job UUID into worker and validator subprocesses, preserving deterministic run identity end-to-end.{line_range_start=45 line_range_end=71 path=draft 3/core_engine.py git_url="https://github.com/Jake36999/IRER_v11_suite_RUN_ID-6/blob/main/draft 3/core_engine.py#L45-L71"}
+
+
+The S-NCGL/SDG worker now accepts --job_uuid, writes simulation_data_{job_uuid}.h5, and the primary validator consumes that artifact and emits provenance keyed by the same UUID.{line_range_start=203 line_range_end=235 path=draft 3/worker_sncgl_sdg.py git_url="https://github.com/Jake36999/IRER_v11_suite_RUN_ID-6/blob/main/draft 3/worker_sncgl_sdg.py#L203-L235"}{line_range_start=58 line_range_end=113 path=draft 3/validation_pipeline_v11.py git_url="https://github.com/Jake36999/IRER_v11_suite_RUN_ID-6/blob/main/draft 3/validation_pipeline_v11.py#L58-L113"}
+
+
+The legacy BSSN validator and hunter result processor now read job UUIDs and the new simulation artifact layout to stay aligned with the updated contract.{line_range_start=10 line_range_end=99 path=draft 3/validation_pipeline_bssn.py git_url="https://github.com/Jake36999/IRER_v11_suite_RUN_ID-6/blob/main/draft 3/validation_pipeline_bssn.py#L10-L99"}{line_range_start=28 line_range_end=131 path=draft 3/aste_hunter.py git_url="https://github.com/Jake36999/IRER_v11_suite_RUN_ID-6/blob/main/draft 3/aste_hunter.py#L28-L131"}
